@@ -84,12 +84,20 @@ async def handle_speaking_phase() -> None:
 
         # Set initial menu
         if "menu" in decision:
-            await mcp_client.save_menu(decision["menu"])
+            result = await mcp_client.save_menu(decision["menu"])
+            if result.get("success"):
+                log("MENU", f"Menu set with {len(decision['menu'])} dishes")
+            else:
+                log("ERROR", f"Failed to set menu: {result.get('error')}")
 
         # Send alliance messages if recommended
         if "messages" in decision:
             for msg in decision["messages"]:
-                await mcp_client.send_message(msg["recipient"], msg["content"])
+                result = await mcp_client.send_message(msg["recipient"], msg["content"])
+                if result.get("success"):
+                    log("MSG", f"Message sent to team {msg['recipient']}")
+                else:
+                    log("ERROR", f"Failed to send message: {result.get('error')}")
 
     except Exception as exc:
         log("PHASE_ERROR", f"Speaking phase failed: {exc}")
@@ -121,9 +129,13 @@ async def handle_closed_bid_phase() -> None:
         # Get LLM decision
         decision = await make_llm_decision("closed_bid", context)
 
-        # Execute closed bid
+        # Execute closed bid (CRITICAL: Only the LAST submission per turn is valid)
         if "bid_ingredients" in decision:
-            await mcp_client.closed_bid(decision["bid_ingredients"])
+            result = await mcp_client.closed_bid(decision["bid_ingredients"])
+            if result.get("success"):
+                log("BID", f"Closed bid submitted: {len(decision['bid_ingredients'])} items")
+            else:
+                log("ERROR", f"Failed to submit bid: {result.get('error')}")
 
     except Exception as exc:
         log("PHASE_ERROR", f"Closed bid phase failed: {exc}")
@@ -159,24 +171,40 @@ async def handle_waiting_phase() -> None:
 
         # Update menu based on actual inventory
         if "menu" in decision:
-            await mcp_client.save_menu(decision["menu"])
+            result = await mcp_client.save_menu(decision["menu"])
+            if result.get("success"):
+                log("MENU", f"Menu updated: {len(decision['menu'])} dishes")
+            else:
+                log("ERROR", f"Failed to update menu: {result.get('error')}")
 
         # Buy missing ingredients from market
         if "market_buys" in decision:
             for buy in decision["market_buys"]:
-                await mcp_client.create_market_entry(
+                result = await mcp_client.create_market_entry(
                     "BUY", buy["ingredient"], buy["quantity"], buy["price"]
                 )
+                if result.get("success"):
+                    log("MARKET", f"BUY {buy['ingredient']} x{buy['quantity']} @ {buy['price']}")
+                else:
+                    log("ERROR", f"Failed to create BUY order: {result.get('error')}")
 
         # Sell excess ingredients
         if "market_sells" in decision:
             for sell in decision["market_sells"]:
-                await mcp_client.create_market_entry(
+                result = await mcp_client.create_market_entry(
                     "SELL", sell["ingredient"], sell["quantity"], sell["price"]
                 )
+                if result.get("success"):
+                    log("MARKET", f"SELL {sell['ingredient']} x{sell['quantity']} @ {sell['price']}")
+                else:
+                    log("ERROR", f"Failed to create SELL order: {result.get('error')}")
 
         # Open the restaurant for serving
-        await mcp_client.update_restaurant_is_open(True)
+        result = await mcp_client.update_restaurant_is_open(True)
+        if result.get("success"):
+            log("OPEN", "Restaurant is now OPEN for service")
+        else:
+            log("ERROR", f"Failed to open restaurant: {result.get('error')}")
 
     except Exception as exc:
         log("PHASE_ERROR", f"Waiting phase failed: {exc}")
@@ -195,7 +223,11 @@ async def handle_serving_phase() -> None:
     # Serving is handled reactively via client_spawned and preparation_complete events
     # Just ensure we're open
     try:
-        await mcp_client.update_restaurant_is_open(True)
+        result = await mcp_client.update_restaurant_is_open(True)
+        if result.get("success"):
+            log("OPEN", "Restaurant is OPEN for service")
+        else:
+            log("ERROR", f"Failed to open restaurant: {result.get('error')}")
     except Exception as exc:
         log("PHASE_ERROR", f"Serving phase setup failed: {exc}")
 
@@ -211,7 +243,11 @@ async def handle_stopped_phase() -> None:
 
     try:
         # Close restaurant
-        await mcp_client.update_restaurant_is_open(False)
+        result = await mcp_client.update_restaurant_is_open(False)
+        if result.get("success"):
+            log("CLOSED", "Restaurant closed after turn")
+        else:
+            log("ERROR", f"Failed to close restaurant: {result.get('error')}")
 
         # Clear prepared dishes tracking
         prepared_dishes.clear()
@@ -307,7 +343,9 @@ async def client_spawned(data: dict[str, Any]) -> None:
         
         # Safe to prepare
         log("COOK", f"Preparing {dish_name} for {client_name}")
-        await mcp_client.prepare_dish(dish_name)
+        result = await mcp_client.prepare_dish(dish_name)
+        if not result.get("success"):
+            log("ERROR", f"Failed to prepare {dish_name}: {result.get('error')}")
 
     except Exception as exc:
         log("CLIENT_ERROR", f"Failed to handle client {client_id}: {exc}")
@@ -324,8 +362,11 @@ async def preparation_complete(data: dict[str, Any]) -> None:
 
     try:
         # Serve the dish
-        await mcp_client.serve_dish(dish_name, client_id)
-        log("SERVE", f"Served {dish_name} to client {client_id}")
+        result = await mcp_client.serve_dish(dish_name, client_id)
+        if result.get("success"):
+            log("SERVE", f"Served {dish_name} to client {client_id}")
+        else:
+            log("ERROR", f"Failed to serve {dish_name}: {result.get('error')}")
 
     except Exception as exc:
         log("SERVE_ERROR", f"Failed to serve dish: {exc}")

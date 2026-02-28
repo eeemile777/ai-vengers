@@ -22,6 +22,10 @@ TEAM_API_KEY = os.getenv("TEAM_API_KEY", "your_team_api_key")
 BASE_URL = "https://hackapizza.datapizza.tech"
 restaurant_id = str(TEAM_ID)
 
+def get_ssl_verify_flag() -> bool:
+    """Read SSL verify mode at runtime so notebook reloads/env changes are respected."""
+    return os.getenv("DISABLE_SSL_VERIFY", "false").lower() != "true"
+
 
 class MCPClient:
     """
@@ -47,9 +51,11 @@ class MCPClient:
         headers = {"x-api-key": self.api_key, "Content-Type": "application/json"}
 
         try:
+            ssl_verify = get_ssl_verify_flag()
+            
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    f"{self.base_url}/mcp", json=payload, headers=headers
+                    f"{self.base_url}/mcp", json=payload, headers=headers, ssl=ssl_verify
                 ) as resp:
                     # Handle rate limiting
                     if resp.status == 429:
@@ -140,8 +146,9 @@ async def get_restaurant_state() -> dict[str, Any]:
     headers = {"x-api-key": TEAM_API_KEY}
     try:
         async with aiohttp.ClientSession() as session:
+            ssl_verify = get_ssl_verify_flag()
             async with session.get(
-                f"{BASE_URL}/restaurant/{restaurant_id}", headers=headers
+                f"{BASE_URL}/restaurant/{restaurant_id}", headers=headers, ssl=ssl_verify
             ) as resp:
                 return await resp.json()
     except Exception as exc:
@@ -156,8 +163,9 @@ async def get_menu() -> dict[str, Any]:
     headers = {"x-api-key": TEAM_API_KEY}
     try:
         async with aiohttp.ClientSession() as session:
+            ssl_verify = get_ssl_verify_flag()
             async with session.get(
-                f"{BASE_URL}/restaurant/{restaurant_id}/menu", headers=headers
+                f"{BASE_URL}/restaurant/{restaurant_id}/menu", headers=headers, ssl=ssl_verify
             ) as resp:
                 return await resp.json()
     except Exception as exc:
@@ -172,7 +180,8 @@ async def get_recipes() -> list[dict[str, Any]]:
     headers = {"x-api-key": TEAM_API_KEY}
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"{BASE_URL}/recipes", headers=headers) as resp:
+            ssl_verify = get_ssl_verify_flag()
+            async with session.get(f"{BASE_URL}/recipes", headers=headers, ssl=ssl_verify) as resp:
                 return await resp.json()
     except Exception as exc:
         log("API_ERROR", f"get_recipes failed: {exc}")
@@ -186,9 +195,11 @@ async def get_meals(turn_id: int) -> list[dict[str, Any]]:
     headers = {"x-api-key": TEAM_API_KEY}
     try:
         async with aiohttp.ClientSession() as session:
+            ssl_verify = get_ssl_verify_flag()
             async with session.get(
                 f"{BASE_URL}/meals?turn_id={turn_id}&restaurant_id={restaurant_id}",
                 headers=headers,
+                ssl=ssl_verify
             ) as resp:
                 return await resp.json()
     except Exception as exc:
@@ -203,7 +214,8 @@ async def get_market_entries() -> list[dict[str, Any]]:
     headers = {"x-api-key": TEAM_API_KEY}
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"{BASE_URL}/market/entries", headers=headers) as resp:
+            ssl_verify = get_ssl_verify_flag()
+            async with session.get(f"{BASE_URL}/market/entries", headers=headers, ssl=ssl_verify) as resp:
                 return await resp.json()
     except Exception as exc:
         log("API_ERROR", f"get_market_entries failed: {exc}")
@@ -217,8 +229,9 @@ async def get_bid_history(turn_id: int) -> list[dict[str, Any]]:
     headers = {"x-api-key": TEAM_API_KEY}
     try:
         async with aiohttp.ClientSession() as session:
+            ssl_verify = get_ssl_verify_flag()
             async with session.get(
-                f"{BASE_URL}/bid_history?turn_id={turn_id}", headers=headers
+                f"{BASE_URL}/bid_history?turn_id={turn_id}", headers=headers, ssl=ssl_verify
             ) as resp:
                 return await resp.json()
     except Exception as exc:
