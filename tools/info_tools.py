@@ -7,6 +7,7 @@ import aiohttp
 from datapizza.tools import Tool
 
 from core.config import BASE_URL, TEAM_API_KEY, TEAM_ID
+from memory.state_manager import state_manager
 
 
 async def _get(path: str, params: dict[str, Any] | None = None) -> Any:
@@ -75,14 +76,14 @@ async def _get_market_entries() -> str:
     return await _get("/market/entries")
 
 
-async def _get_meals(turn_id: int | None = None) -> str:
+async def _get_meals() -> str:
     """
     GET /meals
-    Returns meals for current team; when provided, filters by turn.
+    Returns meals for current team filtered by the current turn.
     """
     params: dict[str, Any] = {"restaurant_id": TEAM_ID}
-    if turn_id is not None:
-        params["turn_id"] = turn_id
+    if state_manager.turn_id is not None:
+        params["turn_id"] = state_manager.turn_id
     return await _get("/meals", params=params)
 
 
@@ -130,8 +131,8 @@ get_meals = Tool(
     func=_get_meals,
     name="get_meals",
     description=(
-        "Fetch meal records for the current team, optionally filtered by turn. "
+        "Fetch meal records for the current team filtered by the current turn. "
         "Call this to review served meals and performance history. "
-        "Input JSON schema: {\"turn_id\": integer, optional}."
+        "Input JSON schema: {} (no parameters needed, automatically uses current turn)."
     ),
 )

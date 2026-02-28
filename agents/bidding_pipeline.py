@@ -7,7 +7,7 @@ from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_
 from tools.market_tools import closed_bid
 
 
-BIDDING_SYSTEM_PROMPT = 'You operate only during the closed_bid phase. CRITICAL DIRECTIVE: First, use get_restaurant and get_recipes to calculate exactly what ingredients you are missing to cook profitable dishes. Then, use the closed_bid tool to submit your auction requests. WARNING: Submitting multiple bids overwrites previous ones. You must group all your ingredient requests into a single closed_bid payload at the end of your reasoning.'
+BIDDING_SYSTEM_PROMPT = 'You operate only during the closed_bid phase. CRITICAL DIRECTIVE: First, use get_restaurant and get_recipes to calculate exactly what ingredients you are missing to cook profitable dishes. Then, use the closed_bid tool to submit your auction requests. WARNING: Submitting multiple bids overwrites previous ones. You must group all your ingredient requests into a single closed_bid payload at the end of your reasoning. Think step-by-step before executing your tool calls.'
 
 
 class BiddingPipeline:
@@ -18,7 +18,16 @@ class BiddingPipeline:
             client=llm_client,
             system_prompt=BIDDING_SYSTEM_PROMPT,
             tools=[closed_bid, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
-            planning_interval=1,
+            planning_interval=0,
+        )
+
+    def flush_agent_memory(self) -> None:
+        self.phase_agent = Agent(
+            name="bidding_phase_agent",
+            client=get_llm_client(),
+            system_prompt=BIDDING_SYSTEM_PROMPT,
+            tools=[closed_bid, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
+            planning_interval=0,
         )
 
     async def a_run(self, task_input: str) -> Any:

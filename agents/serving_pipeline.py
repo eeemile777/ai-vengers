@@ -7,7 +7,7 @@ from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_
 from tools.kitchen_tools import prepare_dish, serve_dish, update_restaurant_is_open, wait_for_dish
 
 
-SERVING_SYSTEM_PROMPT = 'You operate only during the serving phase. The real-time client events do NOT contain the client_id needed for serving. You MUST use the get_meals tool to fetch the active client orders and their corresponding client_ids. Match the clients, prepare safe dishes using prepare_dish, immediately use wait_for_dish, and finally use serve_dish.'
+SERVING_SYSTEM_PROMPT = 'You operate only during the serving phase. The real-time client events do NOT contain the client_id needed for serving. You MUST use the get_meals tool to fetch the active client orders and their corresponding client_ids. Match the clients, prepare safe dishes using prepare_dish, immediately use wait_for_dish, and finally use serve_dish. Think step-by-step before executing your tool calls.'
 
 
 class ServingPipeline:
@@ -18,7 +18,16 @@ class ServingPipeline:
             client=llm_client,
             system_prompt=SERVING_SYSTEM_PROMPT,
             tools=[prepare_dish, wait_for_dish, serve_dish, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
-            planning_interval=1,
+            planning_interval=0,
+        )
+
+    def flush_agent_memory(self) -> None:
+        self.phase_agent = Agent(
+            name="serving_phase_agent",
+            client=get_llm_client(),
+            system_prompt=SERVING_SYSTEM_PROMPT,
+            tools=[prepare_dish, wait_for_dish, serve_dish, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
+            planning_interval=0,
         )
 
     async def a_run(self, task_input: str) -> Any:

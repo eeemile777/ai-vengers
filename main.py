@@ -37,7 +37,6 @@ from agents.waiting_pipeline import waiting_pipeline
 from core.config import BASE_URL, TEAM_API_KEY, TEAM_ID
 from memory.state_manager import state_manager
 from tools.info_tools import _get_restaurant
-from tools.market_tools import send_message
 
 
 def log(tag: str, message: str) -> None:
@@ -98,18 +97,15 @@ async def handle_waiting_phase() -> None:
     log("PIPELINE", str(result))
 
 
-async def handle_serving_phase() -> None:
-    log("PHASE", "SERVING PHASE STARTED")
-    result = await serving_pipeline.a_run(
-        "We are in the serving phase. Use your tools to check active clients and prepared dishes. Prepare safe dishes, wait for them to be marked as ready, and serve them. Close service if no safe serving path exists."
-    )
-    log("PIPELINE", str(result))
-
 
 async def handle_stopped_phase() -> None:
     log("PHASE", "STOPPED PHASE STARTED")
     await print_status_report()
     state_manager.reset_turn_state()
+    bidding_pipeline.flush_agent_memory()
+    serving_pipeline.flush_agent_memory()
+    speaking_pipeline.flush_agent_memory()
+    waiting_pipeline.flush_agent_memory()
     log("STATE", "Turn closed and state reset")
 
 
@@ -131,7 +127,6 @@ async def game_phase_changed(data: dict[str, Any]) -> None:
         "speaking": handle_speaking_phase,
         "closed_bid": handle_closed_bid_phase,
         "waiting": handle_waiting_phase,
-        "serving": handle_serving_phase,
         "stopped": handle_stopped_phase,
     }
 
@@ -142,9 +137,15 @@ async def game_phase_changed(data: dict[str, Any]) -> None:
 
 
 async def client_spawned(data: dict[str, Any]) -> None:
-    client_id = str(data.get("clientId", "unknown"))
-    state_manager.active_clients[client_id] = data
-    log("EVENT", f"CLIENT SPAWNED - client_id={client_id}")
+    client_name = data.get("clientName", "unknown")
+    order_text = data.get("orderText", "")
+    state_manager.active_clients.append(data)
+    log("EVENT", f"CLIENT SPAWNED - clientName={client_name}, order={order_text}")
+    asyncio.create_task(serving_pipeline.a_run(
+        f"A new client has arrived. Client name: {client_name}. "
+        f"Their order and intolerances: \"{order_text}\". "
+        "Use get_meals to fetch their specific client_id, then prepare_dish with a safe dish, wait_for_dish, and serve_dish."
+    ))
 
 
 async def preparation_complete(data: dict[str, Any]) -> None:
@@ -160,8 +161,6 @@ async def message(data: dict[str, Any]) -> None:
 
 async def new_message(data: dict[str, Any]) -> None:
     log("DIRECT_MSG", f"Direct message received: {data}")
-    if sender := data.get("sender", 0):
-        await send_message(int(sender), "Message received.")
 
 
 async def heartbeat(data: dict[str, Any]) -> None:

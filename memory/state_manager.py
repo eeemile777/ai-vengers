@@ -8,7 +8,7 @@ class StateManager:
     phase: str = "unknown"
     recipes: list[dict[str, Any]] = field(default_factory=list)
     prepared_dishes: list[str] = field(default_factory=list)
-    active_clients: dict[str, dict[str, Any]] = field(default_factory=dict)
+    active_clients: list[dict[str, Any]] = field(default_factory=list)
 
     def reset_turn_state(self) -> None:
         self.prepared_dishes.clear()
