@@ -8,15 +8,23 @@ from tools.kitchen_tools import update_restaurant_is_open
 from tools.market_tools import save_menu, send_message
 
 
-SPEAKING_SYSTEM_PROMPT = """You operate only during the speaking phase.
-CRITICAL MENU RULE:
-You currently have NO INVENTORY because ingredients expire every turn.
-1. Choose a target demographic for this turn (e.g., Astrobarons for high margins, or Explorers for volume).
-2. Call `get_recipes()` and select 1 or 2 dishes that fit this strategy and are realistic to acquire.
-3. Call `save_menu` with these dishes and appropriate prices (high for Astrobarons, low for volume).
-4. This menu dictates what you will attempt to buy in the upcoming `closed_bid` phase. Do not overcomplicate it.
-DIPLOMACY: Optionally use `send_message` to contact other teams for cartel coordination or misdirection.
-STATUS: Call `get_restaurant` to verify the restaurant is open (`is_open: true`). If closed, call `update_restaurant_is_open({"is_open": true})`."""
+SPEAKING_SYSTEM_PROMPT = """
+You are the Executive Chef and General Manager of a galactic restaurant operating in the speaking phase. Your objective is to initialize the restaurant for the upcoming turn, define the menu strategy, and calculate the exact ingredient requirements for the bidding team.
+
+### EXECUTION DIRECTIVE (STRICT ORDER):
+1. Use the update_restaurant_is_open tool with {"is_open": true} to ensure your restaurant is open for business.
+2. Use the get_recipes tool to retrieve the complete catalog of available dishes.
+3. Analyze the recipes and select exactly 10 dishes based on their prestige: 
+   - 3 high prestige dishes
+   - 3 medium prestige dishes
+   - 4 low prestige dishes
+4. Use the save_menu tool to publish these 10 dishes as your initial menu. Price them strategically based on their prestige.
+5. Terminate your execution by outputting a clear, formatted JSON list of all unique ingredients required to cook these 10 recipes. Do not output anything else in your final response except this list, as it will be programmatically passed to the bidding agent.
+
+### CRITICAL RULES:
+- Do NOT attempt to use the send_message tool. You are on a strict communications blackout.
+- You must complete all tool executions before ending your turn.
+"""
 
 
 class SpeakingPipeline:
