@@ -36,6 +36,7 @@ from agents.speaking_pipeline import speaking_pipeline
 from agents.waiting_pipeline import waiting_pipeline
 from core.config import BASE_URL, TEAM_API_KEY, TEAM_ID
 from memory.state_manager import state_manager
+from tools.info_tools import _get_restaurant
 from tools.market_tools import send_message
 
 
@@ -44,13 +45,37 @@ def log(tag: str, message: str) -> None:
 
 
 async def init_static_data() -> None:
-    from tools.info_tools import get_recipes
-    state_manager.recipes = await get_recipes()
+    from tools.info_tools import _get_recipes
+    state_manager.recipes = json.loads(await _get_recipes())
     log("INIT", f"Static recipes cached: {len(state_manager.recipes)}")
+
+
+async def print_status_report() -> None:
+    try:
+        restaurant = json.loads(await _get_restaurant())
+        balance = restaurant.get("balance", "N/A")
+        inventory = restaurant.get("inventory", {})
+        active_clients = len(state_manager.active_clients)
+        sep = "-" * 48
+        print(sep)
+        print(f"  STATUS REPORT  |  Turn {state_manager.turn_id}  |  Phase: {state_manager.phase}")
+        print(sep)
+        print(f"  Balance   : {balance}")
+        print(f"  Clients   : {active_clients}")
+        print("  Inventory :")
+        if inventory:
+            for ingredient, qty in inventory.items():
+                print(f"    {ingredient}: {qty}")
+        else:
+            print("    (empty)")
+        print(sep)
+    except Exception as exc:
+        log("STATUS", f"Could not fetch status report: {exc}")
 
 
 async def handle_speaking_phase() -> None:
     log("PHASE", "SPEAKING PHASE STARTED")
+    await print_status_report()
     result = await speaking_pipeline.a_run(
         "We are in the speaking phase. Use your tools to check the restaurant and market, then publish an initial menu and optionally send alliance messages."
     )
@@ -83,6 +108,7 @@ async def handle_serving_phase() -> None:
 
 async def handle_stopped_phase() -> None:
     log("PHASE", "STOPPED PHASE STARTED")
+    await print_status_report()
     state_manager.reset_turn_state()
     log("STATE", "Turn closed and state reset")
 
@@ -123,10 +149,9 @@ async def client_spawned(data: dict[str, Any]) -> None:
 
 async def preparation_complete(data: dict[str, Any]) -> None:
     dish_name = data.get("dish", "")
-    client_id = str(data.get("clientId", "unknown"))
     if dish_name:
-        state_manager.prepared_dishes[client_id] = dish_name
-    log("EVENT", f"PREPARATION COMPLETE - client_id={client_id}, dish={dish_name}")
+        state_manager.prepared_dishes.append(dish_name)
+    log("EVENT", f"PREPARATION COMPLETE - dish={dish_name}")
 
 
 async def message(data: dict[str, Any]) -> None:

@@ -1,7 +1,7 @@
 ================================================================================
 PROJECT EXPORT
 ================================================================================
-Generated: 2026-02-28 19:40:34
+Generated: 2026-02-28 19:51:22
 Root Directory: /Users/milo/ai-vengers
 ================================================================================
 
@@ -1062,6 +1062,7 @@ from agents.speaking_pipeline import speaking_pipeline
 from agents.waiting_pipeline import waiting_pipeline
 from core.config import BASE_URL, TEAM_API_KEY, TEAM_ID
 from memory.state_manager import state_manager
+from tools.info_tools import _get_restaurant
 from tools.market_tools import send_message
 
 
@@ -1070,13 +1071,37 @@ def log(tag: str, message: str) -> None:
 
 
 async def init_static_data() -> None:
-    from tools.info_tools import get_recipes
-    state_manager.recipes = await get_recipes()
+    from tools.info_tools import _get_recipes
+    state_manager.recipes = json.loads(await _get_recipes())
     log("INIT", f"Static recipes cached: {len(state_manager.recipes)}")
+
+
+async def print_status_report() -> None:
+    try:
+        restaurant = json.loads(await _get_restaurant())
+        balance = restaurant.get("balance", "N/A")
+        inventory = restaurant.get("inventory", {})
+        active_clients = len(state_manager.active_clients)
+        sep = "-" * 48
+        print(sep)
+        print(f"  STATUS REPORT  |  Turn {state_manager.turn_id}  |  Phase: {state_manager.phase}")
+        print(sep)
+        print(f"  Balance   : {balance}")
+        print(f"  Clients   : {active_clients}")
+        print("  Inventory :")
+        if inventory:
+            for ingredient, qty in inventory.items():
+                print(f"    {ingredient}: {qty}")
+        else:
+            print("    (empty)")
+        print(sep)
+    except Exception as exc:
+        log("STATUS", f"Could not fetch status report: {exc}")
 
 
 async def handle_speaking_phase() -> None:
     log("PHASE", "SPEAKING PHASE STARTED")
+    await print_status_report()
     result = await speaking_pipeline.a_run(
         "We are in the speaking phase. Use your tools to check the restaurant and market, then publish an initial menu and optionally send alliance messages."
     )
@@ -1109,6 +1134,7 @@ async def handle_serving_phase() -> None:
 
 async def handle_stopped_phase() -> None:
     log("PHASE", "STOPPED PHASE STARTED")
+    await print_status_report()
     state_manager.reset_turn_state()
     log("STATE", "Turn closed and state reset")
 
@@ -1149,10 +1175,9 @@ async def client_spawned(data: dict[str, Any]) -> None:
 
 async def preparation_complete(data: dict[str, Any]) -> None:
     dish_name = data.get("dish", "")
-    client_id = str(data.get("clientId", "unknown"))
     if dish_name:
-        state_manager.prepared_dishes[client_id] = dish_name
-    log("EVENT", f"PREPARATION COMPLETE - client_id={client_id}, dish={dish_name}")
+        state_manager.prepared_dishes.append(dish_name)
+    log("EVENT", f"PREPARATION COMPLETE - dish={dish_name}")
 
 
 async def message(data: dict[str, Any]) -> None:
@@ -1280,6 +1305,7 @@ python-dotenv
 FILE: tools/__init__.py
 --------------------------------------------------------------------------------
 from .info_tools import (
+    _get_recipes,
     get_market_entries,
     get_meals,
     get_recipes,
@@ -1297,6 +1323,7 @@ from .market_tools import (
 )
 
 __all__ = [
+    "_get_recipes",
     "closed_bid",
     "create_market_entry",
     "delete_market_entry",
@@ -1539,14 +1566,9 @@ async def _wait_for_dish(client_id: str, dish_name: str) -> str:
                 "dish_name": dish_name,
             })
         
-        prepared = state_manager.prepared_dishes.get(client_id)
-        if prepared == dish_name:
-            return json.dumps({
-                "ok": True,
-                "client_id": client_id,
-                "dish_name": dish_name,
-                "waited_seconds": elapsed,
-            })
+        if dish_name in state_manager.prepared_dishes:
+            state_manager.prepared_dishes.remove(dish_name)
+            return json.dumps({"ok": True, "dish_name": dish_name})
         
         await asyncio.sleep(1)
 
@@ -1927,7 +1949,7 @@ class StateManager:
     turn_id: int = 0
     phase: str = "unknown"
     recipes: list[dict[str, Any]] = field(default_factory=list)
-    prepared_dishes: dict[str, str] = field(default_factory=dict)
+    prepared_dishes: list[str] = field(default_factory=list)
     active_clients: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def reset_turn_state(self) -> None:
@@ -1966,11 +1988,7 @@ from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_
 from tools.market_tools import closed_bid
 
 
-BIDDING_SYSTEM_PROMPT = """
-You operate only during the closed_bid phase.
-Allowed action: submit exactly one closed_bid payload.
-Do not attempt any other action or tool.
-""".strip()
+BIDDING_SYSTEM_PROMPT = 'You operate only during the closed_bid phase. CRITICAL DIRECTIVE: First, use get_restaurant and get_recipes to calculate exactly what ingredients you are missing to cook profitable dishes. Then, use the closed_bid tool to submit your auction requests. WARNING: Submitting multiple bids overwrites previous ones. You must group all your ingredient requests into a single closed_bid payload at the end of your reasoning.'
 
 
 class BiddingPipeline:
@@ -2000,23 +2018,18 @@ FILE: agents/serving_pipeline.py
 from typing import Any
 
 from datapizza.agents.agent import Agent
-from datapizza.clients.openai_like import OpenAILikeClient
 
-from core.config import REGOLO_API_KEY
+from core.client import get_llm_client
 from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_menu, get_recipes, get_meals
 from tools.kitchen_tools import prepare_dish, serve_dish, update_restaurant_is_open, wait_for_dish
 
 
-SERVING_SYSTEM_PROMPT = 'You operate only during the serving phase. You must autonomously verify client intolerances, prepare safe dishes, and serve them. Allowed actions: prepare_dish, wait_for_dish, serve_dish, update_restaurant_is_open. WARNING: The server strictly enforces a CLOSE ONLY rule for update_restaurant_is_open during this phase. You may only pass {"is_open": false} to panic-close the restaurant if you lack safe ingredients. Never attempt to open the restaurant in this phase.'
+SERVING_SYSTEM_PROMPT = 'You operate only during the serving phase. The real-time client events do NOT contain the client_id needed for serving. You MUST use the get_meals tool to fetch the active client orders and their corresponding client_ids. Match the clients, prepare safe dishes using prepare_dish, immediately use wait_for_dish, and finally use serve_dish.'
 
 
 class ServingPipeline:
     def __init__(self) -> None:
-        llm_client = OpenAILikeClient(
-            api_key=REGOLO_API_KEY,
-            model="gpt-oss-120b",
-            base_url="https://api.regolo.ai/v1",
-        )
+        llm_client = get_llm_client()
         self.phase_agent = Agent(
             name="serving_phase_agent",
             client=llm_client,
@@ -2055,7 +2068,7 @@ class SpeakingPipeline:
             name="speaking_phase_agent",
             client=llm_client,
             system_prompt=SPEAKING_SYSTEM_PROMPT,
-            tools=[send_message, save_menu, update_restaurant_is_open],
+            tools=[send_message, save_menu, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
             planning_interval=1,
         )
 

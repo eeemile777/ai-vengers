@@ -7,11 +7,7 @@ from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_
 from tools.market_tools import closed_bid
 
 
-BIDDING_SYSTEM_PROMPT = """
-You operate only during the closed_bid phase.
-Allowed action: submit exactly one closed_bid payload.
-Do not attempt any other action or tool.
-""".strip()
+BIDDING_SYSTEM_PROMPT = 'You operate only during the closed_bid phase. CRITICAL DIRECTIVE: First, use get_restaurant and get_recipes to calculate exactly what ingredients you are missing to cook profitable dishes. Then, use the closed_bid tool to submit your auction requests. WARNING: Submitting multiple bids overwrites previous ones. You must group all your ingredient requests into a single closed_bid payload at the end of your reasoning.'
 
 
 class BiddingPipeline:

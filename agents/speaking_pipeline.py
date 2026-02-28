@@ -18,7 +18,7 @@ class SpeakingPipeline:
             name="speaking_phase_agent",
             client=llm_client,
             system_prompt=SPEAKING_SYSTEM_PROMPT,
-            tools=[send_message, save_menu, update_restaurant_is_open],
+            tools=[send_message, save_menu, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
             planning_interval=1,
         )
 

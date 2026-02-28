@@ -77,14 +77,9 @@ async def _wait_for_dish(client_id: str, dish_name: str) -> str:
                 "dish_name": dish_name,
             })
         
-        prepared = state_manager.prepared_dishes.get(client_id)
-        if prepared == dish_name:
-            return json.dumps({
-                "ok": True,
-                "client_id": client_id,
-                "dish_name": dish_name,
-                "waited_seconds": elapsed,
-            })
+        if dish_name in state_manager.prepared_dishes:
+            state_manager.prepared_dishes.remove(dish_name)
+            return json.dumps({"ok": True, "dish_name": dish_name})
         
         await asyncio.sleep(1)
 

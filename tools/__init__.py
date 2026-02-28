@@ -1,4 +1,5 @@
 from .info_tools import (
+    _get_recipes,
     get_market_entries,
     get_meals,
     get_recipes,
@@ -16,6 +17,7 @@ from .market_tools import (
 )
 
 __all__ = [
+    "_get_recipes",
     "closed_bid",
     "create_market_entry",
     "delete_market_entry",

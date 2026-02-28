@@ -7,7 +7,7 @@ class StateManager:
     turn_id: int = 0
     phase: str = "unknown"
     recipes: list[dict[str, Any]] = field(default_factory=list)
-    prepared_dishes: dict[str, str] = field(default_factory=dict)
+    prepared_dishes: list[str] = field(default_factory=list)
     active_clients: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def reset_turn_state(self) -> None:
