@@ -287,9 +287,10 @@ async def listen_with_retry() -> None:
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 await listen_once(session)
-                log("SSE", "Connection closed — reconnecting in 3s...")
-                backoff = 5
-                await asyncio.sleep(3)
+            log("SSE", "Connection closed — reconnecting in 3s...")
+            backoff = 5
+            await asyncio.sleep(3)
+
         except aiohttp.ClientResponseError as exc:
             if exc.status == 409:
                 log("SSE", f"409 Conflict — another connection is active. Retrying in {backoff}s...")

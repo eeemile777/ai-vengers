@@ -13,7 +13,7 @@ from .mcp_wrapper import call_mcp_tool
 
 class BidItem(BaseModel):
     ingredient: str
-    bid: float = Field(ge=0, description="Price willing to pay per unit")
+    bid: float = Field(gt=0, description="Price willing to pay per unit (must be > 0)")
     quantity: int = Field(gt=0, description="Units to purchase")
 
 
@@ -130,7 +130,7 @@ closed_bid = Tool(
     name="closed_bid",
     description=(
         "Submit the turn blind auction bid payload. "
-        "Input JSON schema: {\"bids\": [{\"ingredient\": string, \"bid\": number >= 0, \"quantity\": number > 0}, ...]}."
+        "Input JSON schema: {\"bids\": [{\"ingredient\": string, \"bid\": number > 0, \"quantity\": number > 0}, ...]}."
     ),
 )
 
