@@ -25,16 +25,6 @@ class BiddingPipeline:
             planning_interval=1,
         )
 
-    def reset_memory(self) -> None:
-        llm_client = get_llm_client()
-        self.phase_agent = Agent(
-            name="bidding_phase_agent",
-            client=llm_client,
-            system_prompt=BIDDING_SYSTEM_PROMPT,
-            tools=[closed_bid, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
-            planning_interval=1,
-        )
-
     async def a_run(self, task_input: str) -> Any:
         return await self.phase_agent.a_run(
             task_input=task_input,

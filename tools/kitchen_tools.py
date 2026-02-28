@@ -3,11 +3,12 @@ from typing import Any
 from datapizza.tools import Tool
 
 import asyncio
+import json
 from memory.state_manager import state_manager
 from .mcp_wrapper import call_mcp_tool
 
 
-async def _prepare_dish(dish_name: str) -> dict[str, Any]:
+async def _prepare_dish(dish_name: str) -> str:
     """
     Format: {"dish_name": string}
     Avvia la preparazione di un piatto. Allowed only in serving phase.
@@ -15,7 +16,7 @@ async def _prepare_dish(dish_name: str) -> dict[str, Any]:
     return await call_mcp_tool("prepare_dish", {"dish_name": dish_name})
 
 
-async def _serve_dish(dish_name: str, client_id: str) -> dict[str, Any]:
+async def _serve_dish(dish_name: str, client_id: str) -> str:
     """
     Format: {"dish_name": string, "client_id": string}
     Serve a prepared dish to the specified client.
@@ -23,7 +24,7 @@ async def _serve_dish(dish_name: str, client_id: str) -> dict[str, Any]:
     return await call_mcp_tool("serve_dish", {"dish_name": dish_name, "client_id": client_id})
 
 
-async def _update_restaurant_is_open(is_open: bool) -> dict[str, Any]:
+async def _update_restaurant_is_open(is_open: bool) -> str:
     """
     Format: {"is_open": boolean}
     Open or close restaurant service as a safety control.
@@ -59,7 +60,7 @@ update_restaurant_is_open = Tool(
 )
 
 
-async def _wait_for_dish(client_id: str, dish_name: str) -> dict[str, Any]:
+async def _wait_for_dish(client_id: str, dish_name: str) -> str:
     """
     Poll for preparation completion with a 60-second timeout.
     """
@@ -69,21 +70,21 @@ async def _wait_for_dish(client_id: str, dish_name: str) -> dict[str, Any]:
     while True:
         elapsed = asyncio.get_event_loop().time() - start_time
         if elapsed > timeout_seconds:
-            return {
+            return json.dumps({
                 "ok": False,
                 "error": f"Timeout waiting for {dish_name} after {timeout_seconds}s",
                 "client_id": client_id,
                 "dish_name": dish_name,
-            }
+            })
         
         prepared = state_manager.prepared_dishes.get(client_id)
         if prepared == dish_name:
-            return {
+            return json.dumps({
                 "ok": True,
                 "client_id": client_id,
                 "dish_name": dish_name,
                 "waited_seconds": elapsed,
-            }
+            })
         
         await asyncio.sleep(1)
 
