@@ -1,4 +1,5 @@
 import asyncio
+import json
 import uuid
 from typing import Any
 
@@ -7,7 +8,7 @@ import aiohttp
 from core.config import BASE_URL, TEAM_API_KEY
 
 
-async def call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+async def call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> str:
     """Execute an MCP action via JSON-RPC `tools/call` with basic 429 handling."""
     payload = {
         "jsonrpc": "2.0",
@@ -36,12 +37,12 @@ async def call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, 
                     data = await response.json()
 
                     if "error" in data:
-                        return {
+                        return json.dumps({
                             "ok": False,
                             "error": data["error"],
                             "tool": tool_name,
                             "retriable": False,
-                        }
+                        })
 
                     result = data.get("result", {})
                     if result.get("isError"):
@@ -54,20 +55,20 @@ async def call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, 
                         elif isinstance(content, dict):
                             error_msg = content.get("text", "Unknown MCP Error")
 
-                        return {
+                        return json.dumps({
                             "ok": False,
                             "error": error_msg,
                             "tool": tool_name,
                             "retriable": False,
-                        }
+                        })
 
-                    return {
+                    return json.dumps({
                         "ok": True,
                         "tool": tool_name,
                         "result": result,
-                    }
+                    })
         except aiohttp.ClientResponseError as exc:
-            return {
+            return json.dumps({
                 "ok": False,
                 "tool": tool_name,
                 "error": {
@@ -75,25 +76,25 @@ async def call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, 
                     "message": exc.message,
                 },
                 "retriable": exc.status in {408, 429, 500, 502, 503, 504},
-            }
+            })
         except asyncio.TimeoutError:
-            return {
+            return json.dumps({
                 "ok": False,
                 "tool": tool_name,
                 "error": {"message": "Tool call timed out"},
                 "retriable": True,
-            }
+            })
         except Exception as exc:
-            return {
+            return json.dumps({
                 "ok": False,
                 "tool": tool_name,
                 "error": {"message": str(exc)},
                 "retriable": True,
-            }
+            })
 
-    return {
+    return json.dumps({
         "ok": False,
         "tool": tool_name,
         "error": {"message": "Rate limit exceeded after retries"},
         "retriable": True,
-    }
+    })

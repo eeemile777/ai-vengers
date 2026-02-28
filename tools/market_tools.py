@@ -5,7 +5,7 @@ from datapizza.tools import Tool
 from .mcp_wrapper import call_mcp_tool
 
 
-async def _create_market_entry(side: str, ingredient_name: str, quantity: int, price: float) -> dict[str, Any]:
+async def _create_market_entry(side: str, ingredient_name: str, quantity: int, price: float) -> str:
     """
     Format: {"side": "BUY"|"SELL", "ingredient_name": string, "quantity": int, "price": float}
     Create a public market entry to buy or sell ingredients.
@@ -21,7 +21,7 @@ async def _create_market_entry(side: str, ingredient_name: str, quantity: int, p
     )
 
 
-async def _execute_transaction(market_entry_id: int) -> dict[str, Any]:
+async def _execute_transaction(market_entry_id: int) -> str:
     """
     Format: {"market_entry_id": int}
     Execute a transaction against an existing market entry.
@@ -29,7 +29,7 @@ async def _execute_transaction(market_entry_id: int) -> dict[str, Any]:
     return await call_mcp_tool("execute_transaction", {"market_entry_id": market_entry_id})
 
 
-async def _delete_market_entry(market_entry_id: int) -> dict[str, Any]:
+async def _delete_market_entry(market_entry_id: int) -> str:
     """
     Format: {"market_entry_id": int}
     Delete one of our own market entries.
@@ -37,7 +37,7 @@ async def _delete_market_entry(market_entry_id: int) -> dict[str, Any]:
     return await call_mcp_tool("delete_market_entry", {"market_entry_id": market_entry_id})
 
 
-async def _closed_bid(bids: list[dict[str, Any]]) -> dict[str, Any]:
+async def _closed_bid(bids: list[dict[str, Any]]) -> str:
     """
     Format: {"bids": [{"ingredient": string, "bid": number, "quantity": number}, ...]}
     Submit the turn's blind auction bid payload.
@@ -45,7 +45,7 @@ async def _closed_bid(bids: list[dict[str, Any]]) -> dict[str, Any]:
     return await call_mcp_tool("closed_bid", {"bids": bids})
 
 
-async def _save_menu(items: list[dict[str, Any]]) -> dict[str, Any]:
+async def _save_menu(items: list[dict[str, Any]]) -> str:
     """
     Format: {"items": [{"name": string, "price": number}, ...]}
     Save or replace the current restaurant menu.
@@ -53,7 +53,7 @@ async def _save_menu(items: list[dict[str, Any]]) -> dict[str, Any]:
     return await call_mcp_tool("save_menu", {"items": items})
 
 
-async def _send_message(recipient_id: int, text: str) -> dict[str, Any]:
+async def _send_message(recipient_id: int, text: str) -> str:
     """
     Format: {"recipient_id": number, "text": string}
     Send a direct message to another team.

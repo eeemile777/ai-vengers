@@ -1,6 +1,7 @@
 from typing import Any
 
 import asyncio
+import json
 
 import aiohttp
 from datapizza.tools import Tool
@@ -26,7 +27,7 @@ async def _get(path: str, params: dict[str, Any] | None = None) -> Any:
                         continue
                         
                     response.raise_for_status()
-                    return await response.json()
+                    return json.dumps(await response.json())
                     
         except aiohttp.ClientResponseError as exc:
             if exc.status in {408, 429, 500, 502, 503, 504} and attempt < max_attempts - 1:
@@ -42,7 +43,7 @@ async def _get(path: str, params: dict[str, Any] | None = None) -> Any:
             raise
 
 
-async def _get_restaurant(restaurant_id: int | str = TEAM_ID) -> dict[str, Any]:
+async def _get_restaurant(restaurant_id: int | str = TEAM_ID) -> str:
     """
     GET /restaurant/:id
     Returns the live restaurant state including balance and inventory.
@@ -50,7 +51,7 @@ async def _get_restaurant(restaurant_id: int | str = TEAM_ID) -> dict[str, Any]:
     return await _get(f"/restaurant/{restaurant_id}")
 
 
-async def _get_restaurant_menu(restaurant_id: int | str = TEAM_ID) -> dict[str, Any]:
+async def _get_restaurant_menu(restaurant_id: int | str = TEAM_ID) -> str:
     """
     GET /restaurant/:id/menu
     Returns menu items currently published by the restaurant.
@@ -58,7 +59,7 @@ async def _get_restaurant_menu(restaurant_id: int | str = TEAM_ID) -> dict[str, 
     return await _get(f"/restaurant/{restaurant_id}/menu")
 
 
-async def _get_recipes() -> list[dict[str, Any]]:
+async def _get_recipes() -> str:
     """
     GET /recipes
     Returns all recipes and their required ingredients.
@@ -66,7 +67,7 @@ async def _get_recipes() -> list[dict[str, Any]]:
     return await _get("/recipes")
 
 
-async def _get_market_entries() -> list[dict[str, Any]]:
+async def _get_market_entries() -> str:
     """
     GET /market/entries
     Returns active public market orders.
@@ -74,7 +75,7 @@ async def _get_market_entries() -> list[dict[str, Any]]:
     return await _get("/market/entries")
 
 
-async def _get_meals(turn_id: int | None = None) -> list[dict[str, Any]]:
+async def _get_meals(turn_id: int | None = None) -> str:
     """
     GET /meals
     Returns meals for current team; when provided, filters by turn.

@@ -4,14 +4,11 @@ from datapizza.agents.agent import Agent
 
 from core.client import get_llm_client
 from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_menu, get_recipes, get_meals
+from tools.kitchen_tools import update_restaurant_is_open
 from tools.market_tools import save_menu, send_message
 
 
-SPEAKING_SYSTEM_PROMPT = """
-You operate only during the speaking phase.
-Allowed actions: send_message and save_menu.
-Do not attempt any other action or tool.
-""".strip()
+SPEAKING_SYSTEM_PROMPT = 'You operate only during the speaking phase. Allowed actions: send_message, save_menu, and update_restaurant_is_open. IMPORTANT: Use the get_restaurant tool to check your status. If your restaurant is currently closed (is_open: false), you MUST use update_restaurant_is_open(true) to open it for the upcoming shift, but ONLY AFTER you have successfully planned your menu.'
 
 
 class SpeakingPipeline:
@@ -21,17 +18,7 @@ class SpeakingPipeline:
             name="speaking_phase_agent",
             client=llm_client,
             system_prompt=SPEAKING_SYSTEM_PROMPT,
-            tools=[send_message, save_menu],
-            planning_interval=1,
-        )
-
-    def reset_memory(self) -> None:
-        llm_client = get_llm_client()
-        self.phase_agent = Agent(
-            name="speaking_phase_agent",
-            client=llm_client,
-            system_prompt=SPEAKING_SYSTEM_PROMPT,
-            tools=[send_message, save_menu, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
+            tools=[send_message, save_menu, update_restaurant_is_open],
             planning_interval=1,
         )
 
