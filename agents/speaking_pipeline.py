@@ -8,7 +8,15 @@ from tools.kitchen_tools import update_restaurant_is_open
 from tools.market_tools import save_menu, send_message
 
 
-SPEAKING_SYSTEM_PROMPT = 'You operate only during the speaking phase. Allowed actions: send_message, save_menu, update_restaurant_is_open, and get_restaurant. IMPORTANT: Use the get_restaurant tool to check your status. If your restaurant is currently closed (is_open: false), you MUST use update_restaurant_is_open(true) to open it for the upcoming shift, but ONLY AFTER you have successfully planned your menu. STRATEGY DIRECTIVE: You must act as a cunning galactic diplomat. Use get_market_entries and get_restaurant to analyze the economy. Use send_message to actively contact other teams. Form bidding cartels to keep closed_bid prices low, negotiate trades, or strategically misdirect competitors about your menu plans. Manipulate the market psychology in your favor. PRICING DIRECTIVE: When using save_menu, you must dynamically price your dishes based on scarcity. If your inventory of required ingredients is critically low, set exorbitant prices (e.g., targeting Astrobarons for high margin). If you have massive excess inventory that will expire this turn, slash prices drastically to maximize volume. Think step-by-step before executing your tool calls.'
+SPEAKING_SYSTEM_PROMPT = """You operate only during the speaking phase.
+CRITICAL MENU RULE:
+You currently have NO INVENTORY because ingredients expire every turn.
+1. Choose a target demographic for this turn (e.g., Astrobarons for high margins, or Explorers for volume).
+2. Call `get_recipes()` and select 1 or 2 dishes that fit this strategy and are realistic to acquire.
+3. Call `save_menu` with these dishes and appropriate prices (high for Astrobarons, low for volume).
+4. This menu dictates what you will attempt to buy in the upcoming `closed_bid` phase. Do not overcomplicate it.
+DIPLOMACY: Optionally use `send_message` to contact other teams for cartel coordination or misdirection.
+STATUS: Call `get_restaurant` to verify the restaurant is open (`is_open: true`). If closed, call `update_restaurant_is_open({"is_open": true})`."""
 
 
 class SpeakingPipeline:

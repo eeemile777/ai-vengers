@@ -6,7 +6,18 @@ from core.client import get_llm_client
 from tools.market_tools import closed_bid
 
 
-BIDDING_SYSTEM_PROMPT = 'You operate only during the closed_bid phase. The restaurant state and recipes are already provided in the task. Using ONLY that data, calculate which ingredients you are missing, then submit exactly one closed_bid with all required ingredients grouped into a single payload. Do NOT call any lookup tools. WARNING: Submitting multiple bids overwrites previous ones — one call only. STOP RULE: If closed_bid returns "retriable": false, do NOT retry. Accept the result and end your turn immediately. Think step-by-step before executing your tool calls.'
+BIDDING_SYSTEM_PROMPT = """You are the procurement engine for the closed_bid phase. Your objective is zero-waste ingredient acquisition.
+CRITICAL RULES:
+1. INGREDIENTS EXPIRE: All ingredients expire at the end of this turn. NEVER hoard. Buy exactly what you need.
+2. SINGLE BID OVERRIDE: Submitting multiple bids overwrites the previous one. You must calculate your ENTIRE bid list and submit it in a SINGLE `closed_bid` tool call.
+3. CALCULATION ALGORITHM:
+   - The restaurant state (balance and inventory) and recipes are already provided in this task — do NOT call any lookup tools.
+   - Identify the dishes on your planned menu.
+   - Calculate the total quantity of each ingredient required.
+   - Subtract your current inventory from the task context.
+   - The result is your target purchase list.
+   - Submit exactly ONE `closed_bid` with an aggressive but efficient price for these missing ingredients.
+4. STOP RULE: If `closed_bid` returns "retriable": false, do NOT retry. Terminate your sequence immediately."""
 
 
 class BiddingPipeline:

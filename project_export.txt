@@ -1,7 +1,7 @@
 ================================================================================
 PROJECT EXPORT
 ================================================================================
-Generated: 2026-02-28 20:20:34
+Generated: 2026-02-28 21:12:35
 Root Directory: /Users/milo/ai-vengers
 ================================================================================
 
@@ -1109,8 +1109,16 @@ async def handle_speaking_phase() -> None:
 
 async def handle_closed_bid_phase() -> None:
     log("PHASE", "CLOSED_BID PHASE STARTED")
+    try:
+        restaurant = json.loads(await _get_restaurant())
+    except Exception as exc:
+        log("PHASE", f"Could not pre-fetch restaurant for bidding: {exc}")
+        restaurant = {}
     result = await bidding_pipeline.a_run(
-        "We are in the closed_bid phase. Use your tools to check market and restaurant state, then submit exactly one optimized closed_bid."
+        f"We are in the closed_bid phase. "
+        f"Current restaurant state (balance and inventory): {json.dumps(restaurant)}. "
+        f"Available recipes: {json.dumps(state_manager.recipes)}. "
+        "Using only this data, calculate which ingredients you are missing and submit exactly one closed_bid immediately. Do NOT call get_restaurant or get_recipes again."
     )
     log("PIPELINE", str(result))
 
@@ -1294,8 +1302,9 @@ if __name__ == "__main__":
 FILE: requirements.txt
 --------------------------------------------------------------------------------
 aiohttp
-datapizza-ai
-datapizza-ai-clients-openai-like
+datapizza-ai==0.0.9
+datapizza-ai-core==0.0.23
+datapizza-ai-clients-openai-like==0.0.9
 python-dotenv
 
 
@@ -1984,11 +1993,21 @@ from typing import Any
 from datapizza.agents.agent import Agent
 
 from core.client import get_llm_client
-from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_menu, get_recipes, get_meals
 from tools.market_tools import closed_bid
 
 
-BIDDING_SYSTEM_PROMPT = 'You operate only during the closed_bid phase. CRITICAL DIRECTIVE: First, use get_restaurant and get_recipes to calculate exactly what ingredients you are missing to cook profitable dishes. Then, use the closed_bid tool to submit your auction requests. WARNING: Submitting multiple bids overwrites previous ones. You must group all your ingredient requests into a single closed_bid payload at the end of your reasoning. Think step-by-step before executing your tool calls.'
+BIDDING_SYSTEM_PROMPT = """You are the procurement engine for the closed_bid phase. Your objective is zero-waste ingredient acquisition.
+CRITICAL RULES:
+1. INGREDIENTS EXPIRE: All ingredients expire at the end of this turn. NEVER hoard. Buy exactly what you need.
+2. SINGLE BID OVERRIDE: Submitting multiple bids overwrites the previous one. You must calculate your ENTIRE bid list and submit it in a SINGLE `closed_bid` tool call.
+3. CALCULATION ALGORITHM:
+   - The restaurant state (balance and inventory) and recipes are already provided in this task — do NOT call any lookup tools.
+   - Identify the dishes on your planned menu.
+   - Calculate the total quantity of each ingredient required.
+   - Subtract your current inventory from the task context.
+   - The result is your target purchase list.
+   - Submit exactly ONE `closed_bid` with an aggressive but efficient price for these missing ingredients.
+4. STOP RULE: If `closed_bid` returns "retriable": false, do NOT retry. Terminate your sequence immediately."""
 
 
 class BiddingPipeline:
@@ -1998,8 +2017,9 @@ class BiddingPipeline:
             name="bidding_phase_agent",
             client=llm_client,
             system_prompt=BIDDING_SYSTEM_PROMPT,
-            tools=[closed_bid, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
+            tools=[closed_bid],
             planning_interval=0,
+            max_steps=5,
         )
 
     def flush_agent_memory(self) -> None:
@@ -2007,8 +2027,9 @@ class BiddingPipeline:
             name="bidding_phase_agent",
             client=get_llm_client(),
             system_prompt=BIDDING_SYSTEM_PROMPT,
-            tools=[closed_bid, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
+            tools=[closed_bid],
             planning_interval=0,
+            max_steps=5,
         )
 
     async def a_run(self, task_input: str) -> Any:
@@ -2033,7 +2054,17 @@ from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_
 from tools.kitchen_tools import prepare_dish, serve_dish, update_restaurant_is_open, wait_for_dish
 
 
-SERVING_SYSTEM_PROMPT = 'You operate only during the serving phase. The real-time client events do NOT contain the client_id needed for serving. You MUST use the get_meals tool to fetch the active client orders and their corresponding client_ids. Match the clients, prepare safe dishes using prepare_dish, immediately use wait_for_dish, and finally use serve_dish. Think step-by-step before executing your tool calls.'
+SERVING_SYSTEM_PROMPT = """You are the autonomous execution engine for the serving phase. Your ONLY goal is safely serving clients and protecting the restaurant's reputation.
+CRITICAL RULES:
+1. LETHAL INTOLERANCES: You MUST check the 'intolerances' field for every client before cooking. Serving a dish containing an intolerant ingredient causes catastrophic failure.
+2. EXECUTION ALGORITHM: For EVERY client that spawns:
+   - Call `get_meals()` to find their specific `client_id` and order text.
+   - Cross-reference their intolerances with `get_recipes()`.
+   - Call `prepare_dish({"dish_name": "<safe_dish>"})`.
+   - Call `wait_for_dish({"client_id": "<id>", "dish_name": "<safe_dish>"})` to synchronize the SSE completion event.
+   - Call `serve_dish({"dish_name": "<safe_dish>", "client_id": "<id>"})`.
+3. PANIC BUTTON: If you lack the ingredients to cook a safe dish, or if you are overwhelmed by volume, you MUST call `update_restaurant_is_open({"is_open": false})` immediately to protect our reputation. Do NOT hallucinate ingredients you do not have.
+Think step-by-step and strictly follow the execution algorithm."""
 
 
 class ServingPipeline:
@@ -2045,6 +2076,7 @@ class ServingPipeline:
             system_prompt=SERVING_SYSTEM_PROMPT,
             tools=[prepare_dish, wait_for_dish, serve_dish, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
             planning_interval=0,
+            max_steps=15,
         )
 
     def flush_agent_memory(self) -> None:
@@ -2054,6 +2086,7 @@ class ServingPipeline:
             system_prompt=SERVING_SYSTEM_PROMPT,
             tools=[prepare_dish, wait_for_dish, serve_dish, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
             planning_interval=0,
+            max_steps=15,
         )
 
     async def a_run(self, task_input: str) -> Any:
@@ -2076,7 +2109,15 @@ from tools.kitchen_tools import update_restaurant_is_open
 from tools.market_tools import save_menu, send_message
 
 
-SPEAKING_SYSTEM_PROMPT = 'You operate only during the speaking phase. Allowed actions: send_message, save_menu, update_restaurant_is_open, and get_restaurant. IMPORTANT: Use the get_restaurant tool to check your status. If your restaurant is currently closed (is_open: false), you MUST use update_restaurant_is_open(true) to open it for the upcoming shift, but ONLY AFTER you have successfully planned your menu. Think step-by-step before executing your tool calls.'
+SPEAKING_SYSTEM_PROMPT = """You operate only during the speaking phase.
+CRITICAL MENU RULE:
+You currently have NO INVENTORY because ingredients expire every turn.
+1. Choose a target demographic for this turn (e.g., Astrobarons for high margins, or Explorers for volume).
+2. Call `get_recipes()` and select 1 or 2 dishes that fit this strategy and are realistic to acquire.
+3. Call `save_menu` with these dishes and appropriate prices (high for Astrobarons, low for volume).
+4. This menu dictates what you will attempt to buy in the upcoming `closed_bid` phase. Do not overcomplicate it.
+DIPLOMACY: Optionally use `send_message` to contact other teams for cartel coordination or misdirection.
+STATUS: Call `get_restaurant` to verify the restaurant is open (`is_open: true`). If closed, call `update_restaurant_is_open({"is_open": true})`."""
 
 
 class SpeakingPipeline:
@@ -2088,6 +2129,7 @@ class SpeakingPipeline:
             system_prompt=SPEAKING_SYSTEM_PROMPT,
             tools=[send_message, save_menu, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
             planning_interval=0,
+            max_steps=15,
         )
 
     def flush_agent_memory(self) -> None:
@@ -2097,6 +2139,7 @@ class SpeakingPipeline:
             system_prompt=SPEAKING_SYSTEM_PROMPT,
             tools=[send_message, save_menu, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
             planning_interval=0,
+            max_steps=15,
         )
 
     async def a_run(self, task_input: str) -> Any:
@@ -2124,7 +2167,16 @@ from tools.market_tools import (
 )
 
 
-WAITING_SYSTEM_PROMPT = 'You operate only during the waiting phase. Allowed actions: save_menu, create_market_entry, execute_transaction, delete_market_entry, and update_restaurant_is_open. IMPORTANT: Use get_restaurant to check your status. If your restaurant is closed and you have successfully secured ingredients and saved a valid menu via save_menu, you MUST use update_restaurant_is_open(true) to open the doors before the serving phase begins. Think step-by-step before executing your tool calls.'
+WAITING_SYSTEM_PROMPT = """You operate only during the waiting phase. This is a critical safety check before the doors open.
+CRITICAL RULES:
+1. INVENTORY REALITY CHECK: Call `get_restaurant` to see your ACTUAL won inventory.
+2. RECIPE CROSS-REFERENCE: Call `get_recipes()` and for every dish on your current menu, verify you have ALL required ingredients in sufficient quantity. Never leave a dish on the menu if you are missing a single required ingredient.
+3. MENU CORRECTION: Call `save_menu` to REMOVE any dish you cannot physically cook. Only keep dishes you can fully prepare.
+4. ARBITRAGE ALGORITHM:
+   - Call `get_market_entries` to scan the public market.
+   - BUYING: If you are one ingredient short on a high-value dish, use `execute_transaction` to snipe it from the market.
+   - SELLING: If you have excess ingredients that will expire this turn, use `create_market_entry({"side": "SELL", ...})` to recover value.
+5. DOOR CHECK: Once your menu contains only cookable dishes, call `update_restaurant_is_open({"is_open": true})` so clients can arrive."""
 
 
 class WaitingPipeline:
@@ -2136,6 +2188,7 @@ class WaitingPipeline:
             system_prompt=WAITING_SYSTEM_PROMPT,
             tools=[save_menu, create_market_entry, execute_transaction, delete_market_entry, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
             planning_interval=0,
+            max_steps=20,
         )
 
     def flush_agent_memory(self) -> None:
@@ -2145,6 +2198,7 @@ class WaitingPipeline:
             system_prompt=WAITING_SYSTEM_PROMPT,
             tools=[save_menu, create_market_entry, execute_transaction, delete_market_entry, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
             planning_interval=0,
+            max_steps=20,
         )
 
     async def a_run(self, task_input: str) -> Any:
