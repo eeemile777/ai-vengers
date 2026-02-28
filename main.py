@@ -83,8 +83,16 @@ async def handle_speaking_phase() -> None:
 
 async def handle_closed_bid_phase() -> None:
     log("PHASE", "CLOSED_BID PHASE STARTED")
+    try:
+        restaurant = json.loads(await _get_restaurant())
+    except Exception as exc:
+        log("PHASE", f"Could not pre-fetch restaurant for bidding: {exc}")
+        restaurant = {}
     result = await bidding_pipeline.a_run(
-        "We are in the closed_bid phase. Use your tools to check market and restaurant state, then submit exactly one optimized closed_bid."
+        f"We are in the closed_bid phase. "
+        f"Current restaurant state (balance and inventory): {json.dumps(restaurant)}. "
+        f"Available recipes: {json.dumps(state_manager.recipes)}. "
+        "Using only this data, calculate which ingredients you are missing and submit exactly one closed_bid immediately. Do NOT call get_restaurant or get_recipes again."
     )
     log("PIPELINE", str(result))
 

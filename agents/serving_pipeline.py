@@ -19,6 +19,7 @@ class ServingPipeline:
             system_prompt=SERVING_SYSTEM_PROMPT,
             tools=[prepare_dish, wait_for_dish, serve_dish, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
             planning_interval=0,
+            max_steps=15,
         )
 
     def flush_agent_memory(self) -> None:
@@ -28,6 +29,7 @@ class ServingPipeline:
             system_prompt=SERVING_SYSTEM_PROMPT,
             tools=[prepare_dish, wait_for_dish, serve_dish, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
             planning_interval=0,
+            max_steps=15,
         )
 
     async def a_run(self, task_input: str) -> Any:

@@ -1,4 +1,5 @@
 aiohttp
-datapizza-ai
-datapizza-ai-clients-openai-like
+datapizza-ai==0.0.9
+datapizza-ai-core==0.0.23
+datapizza-ai-clients-openai-like==0.0.9
 python-dotenv

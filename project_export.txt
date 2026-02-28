@@ -1,7 +1,7 @@
 ================================================================================
 PROJECT EXPORT
 ================================================================================
-Generated: 2026-02-28 19:51:22
+Generated: 2026-02-28 20:20:34
 Root Directory: /Users/milo/ai-vengers
 ================================================================================
 
@@ -1063,7 +1063,6 @@ from agents.waiting_pipeline import waiting_pipeline
 from core.config import BASE_URL, TEAM_API_KEY, TEAM_ID
 from memory.state_manager import state_manager
 from tools.info_tools import _get_restaurant
-from tools.market_tools import send_message
 
 
 def log(tag: str, message: str) -> None:
@@ -1124,18 +1123,15 @@ async def handle_waiting_phase() -> None:
     log("PIPELINE", str(result))
 
 
-async def handle_serving_phase() -> None:
-    log("PHASE", "SERVING PHASE STARTED")
-    result = await serving_pipeline.a_run(
-        "We are in the serving phase. Use your tools to check active clients and prepared dishes. Prepare safe dishes, wait for them to be marked as ready, and serve them. Close service if no safe serving path exists."
-    )
-    log("PIPELINE", str(result))
-
 
 async def handle_stopped_phase() -> None:
     log("PHASE", "STOPPED PHASE STARTED")
     await print_status_report()
     state_manager.reset_turn_state()
+    bidding_pipeline.flush_agent_memory()
+    serving_pipeline.flush_agent_memory()
+    speaking_pipeline.flush_agent_memory()
+    waiting_pipeline.flush_agent_memory()
     log("STATE", "Turn closed and state reset")
 
 
@@ -1157,7 +1153,6 @@ async def game_phase_changed(data: dict[str, Any]) -> None:
         "speaking": handle_speaking_phase,
         "closed_bid": handle_closed_bid_phase,
         "waiting": handle_waiting_phase,
-        "serving": handle_serving_phase,
         "stopped": handle_stopped_phase,
     }
 
@@ -1168,9 +1163,15 @@ async def game_phase_changed(data: dict[str, Any]) -> None:
 
 
 async def client_spawned(data: dict[str, Any]) -> None:
-    client_id = str(data.get("clientId", "unknown"))
-    state_manager.active_clients[client_id] = data
-    log("EVENT", f"CLIENT SPAWNED - client_id={client_id}")
+    client_name = data.get("clientName", "unknown")
+    order_text = data.get("orderText", "")
+    state_manager.active_clients.append(data)
+    log("EVENT", f"CLIENT SPAWNED - clientName={client_name}, order={order_text}")
+    asyncio.create_task(serving_pipeline.a_run(
+        f"A new client has arrived. Client name: {client_name}. "
+        f"Their order and intolerances: \"{order_text}\". "
+        "Use get_meals to fetch their specific client_id, then prepare_dish with a safe dish, wait_for_dish, and serve_dish."
+    ))
 
 
 async def preparation_complete(data: dict[str, Any]) -> None:
@@ -1186,8 +1187,6 @@ async def message(data: dict[str, Any]) -> None:
 
 async def new_message(data: dict[str, Any]) -> None:
     log("DIRECT_MSG", f"Direct message received: {data}")
-    if sender := data.get("sender", 0):
-        await send_message(int(sender), "Message received.")
 
 
 async def heartbeat(data: dict[str, Any]) -> None:
@@ -1354,6 +1353,7 @@ import aiohttp
 from datapizza.tools import Tool
 
 from core.config import BASE_URL, TEAM_API_KEY, TEAM_ID
+from memory.state_manager import state_manager
 
 
 async def _get(path: str, params: dict[str, Any] | None = None) -> Any:
@@ -1422,14 +1422,14 @@ async def _get_market_entries() -> str:
     return await _get("/market/entries")
 
 
-async def _get_meals(turn_id: int | None = None) -> str:
+async def _get_meals() -> str:
     """
     GET /meals
-    Returns meals for current team; when provided, filters by turn.
+    Returns meals for current team filtered by the current turn.
     """
     params: dict[str, Any] = {"restaurant_id": TEAM_ID}
-    if turn_id is not None:
-        params["turn_id"] = turn_id
+    if state_manager.turn_id is not None:
+        params["turn_id"] = state_manager.turn_id
     return await _get("/meals", params=params)
 
 
@@ -1477,9 +1477,9 @@ get_meals = Tool(
     func=_get_meals,
     name="get_meals",
     description=(
-        "Fetch meal records for the current team, optionally filtered by turn. "
+        "Fetch meal records for the current team filtered by the current turn. "
         "Call this to review served meals and performance history. "
-        "Input JSON schema: {\"turn_id\": integer, optional}."
+        "Input JSON schema: {} (no parameters needed, automatically uses current turn)."
     ),
 )
 
@@ -1950,7 +1950,7 @@ class StateManager:
     phase: str = "unknown"
     recipes: list[dict[str, Any]] = field(default_factory=list)
     prepared_dishes: list[str] = field(default_factory=list)
-    active_clients: dict[str, dict[str, Any]] = field(default_factory=dict)
+    active_clients: list[dict[str, Any]] = field(default_factory=list)
 
     def reset_turn_state(self) -> None:
         self.prepared_dishes.clear()
@@ -1988,7 +1988,7 @@ from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_
 from tools.market_tools import closed_bid
 
 
-BIDDING_SYSTEM_PROMPT = 'You operate only during the closed_bid phase. CRITICAL DIRECTIVE: First, use get_restaurant and get_recipes to calculate exactly what ingredients you are missing to cook profitable dishes. Then, use the closed_bid tool to submit your auction requests. WARNING: Submitting multiple bids overwrites previous ones. You must group all your ingredient requests into a single closed_bid payload at the end of your reasoning.'
+BIDDING_SYSTEM_PROMPT = 'You operate only during the closed_bid phase. CRITICAL DIRECTIVE: First, use get_restaurant and get_recipes to calculate exactly what ingredients you are missing to cook profitable dishes. Then, use the closed_bid tool to submit your auction requests. WARNING: Submitting multiple bids overwrites previous ones. You must group all your ingredient requests into a single closed_bid payload at the end of your reasoning. Think step-by-step before executing your tool calls.'
 
 
 class BiddingPipeline:
@@ -1999,7 +1999,16 @@ class BiddingPipeline:
             client=llm_client,
             system_prompt=BIDDING_SYSTEM_PROMPT,
             tools=[closed_bid, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
-            planning_interval=1,
+            planning_interval=0,
+        )
+
+    def flush_agent_memory(self) -> None:
+        self.phase_agent = Agent(
+            name="bidding_phase_agent",
+            client=get_llm_client(),
+            system_prompt=BIDDING_SYSTEM_PROMPT,
+            tools=[closed_bid, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
+            planning_interval=0,
         )
 
     async def a_run(self, task_input: str) -> Any:
@@ -2024,7 +2033,7 @@ from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_
 from tools.kitchen_tools import prepare_dish, serve_dish, update_restaurant_is_open, wait_for_dish
 
 
-SERVING_SYSTEM_PROMPT = 'You operate only during the serving phase. The real-time client events do NOT contain the client_id needed for serving. You MUST use the get_meals tool to fetch the active client orders and their corresponding client_ids. Match the clients, prepare safe dishes using prepare_dish, immediately use wait_for_dish, and finally use serve_dish.'
+SERVING_SYSTEM_PROMPT = 'You operate only during the serving phase. The real-time client events do NOT contain the client_id needed for serving. You MUST use the get_meals tool to fetch the active client orders and their corresponding client_ids. Match the clients, prepare safe dishes using prepare_dish, immediately use wait_for_dish, and finally use serve_dish. Think step-by-step before executing your tool calls.'
 
 
 class ServingPipeline:
@@ -2035,7 +2044,16 @@ class ServingPipeline:
             client=llm_client,
             system_prompt=SERVING_SYSTEM_PROMPT,
             tools=[prepare_dish, wait_for_dish, serve_dish, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
-            planning_interval=1,
+            planning_interval=0,
+        )
+
+    def flush_agent_memory(self) -> None:
+        self.phase_agent = Agent(
+            name="serving_phase_agent",
+            client=get_llm_client(),
+            system_prompt=SERVING_SYSTEM_PROMPT,
+            tools=[prepare_dish, wait_for_dish, serve_dish, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
+            planning_interval=0,
         )
 
     async def a_run(self, task_input: str) -> Any:
@@ -2058,7 +2076,7 @@ from tools.kitchen_tools import update_restaurant_is_open
 from tools.market_tools import save_menu, send_message
 
 
-SPEAKING_SYSTEM_PROMPT = 'You operate only during the speaking phase. Allowed actions: send_message, save_menu, and update_restaurant_is_open. IMPORTANT: Use the get_restaurant tool to check your status. If your restaurant is currently closed (is_open: false), you MUST use update_restaurant_is_open(true) to open it for the upcoming shift, but ONLY AFTER you have successfully planned your menu.'
+SPEAKING_SYSTEM_PROMPT = 'You operate only during the speaking phase. Allowed actions: send_message, save_menu, update_restaurant_is_open, and get_restaurant. IMPORTANT: Use the get_restaurant tool to check your status. If your restaurant is currently closed (is_open: false), you MUST use update_restaurant_is_open(true) to open it for the upcoming shift, but ONLY AFTER you have successfully planned your menu. Think step-by-step before executing your tool calls.'
 
 
 class SpeakingPipeline:
@@ -2069,7 +2087,16 @@ class SpeakingPipeline:
             client=llm_client,
             system_prompt=SPEAKING_SYSTEM_PROMPT,
             tools=[send_message, save_menu, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
-            planning_interval=1,
+            planning_interval=0,
+        )
+
+    def flush_agent_memory(self) -> None:
+        self.phase_agent = Agent(
+            name="speaking_phase_agent",
+            client=get_llm_client(),
+            system_prompt=SPEAKING_SYSTEM_PROMPT,
+            tools=[send_message, save_menu, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
+            planning_interval=0,
         )
 
     async def a_run(self, task_input: str) -> Any:
@@ -2097,7 +2124,7 @@ from tools.market_tools import (
 )
 
 
-WAITING_SYSTEM_PROMPT = 'You operate only during the waiting phase. Allowed actions: save_menu, create_market_entry, execute_transaction, delete_market_entry, and update_restaurant_is_open. IMPORTANT: Use get_restaurant to check your status. If your restaurant is closed and you have successfully secured ingredients and saved a valid menu via save_menu, you MUST use update_restaurant_is_open(true) to open the doors before the serving phase begins.'
+WAITING_SYSTEM_PROMPT = 'You operate only during the waiting phase. Allowed actions: save_menu, create_market_entry, execute_transaction, delete_market_entry, and update_restaurant_is_open. IMPORTANT: Use get_restaurant to check your status. If your restaurant is closed and you have successfully secured ingredients and saved a valid menu via save_menu, you MUST use update_restaurant_is_open(true) to open the doors before the serving phase begins. Think step-by-step before executing your tool calls.'
 
 
 class WaitingPipeline:
@@ -2108,7 +2135,16 @@ class WaitingPipeline:
             client=llm_client,
             system_prompt=WAITING_SYSTEM_PROMPT,
             tools=[save_menu, create_market_entry, execute_transaction, delete_market_entry, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
-            planning_interval=1,
+            planning_interval=0,
+        )
+
+    def flush_agent_memory(self) -> None:
+        self.phase_agent = Agent(
+            name="waiting_phase_agent",
+            client=get_llm_client(),
+            system_prompt=WAITING_SYSTEM_PROMPT,
+            tools=[save_menu, create_market_entry, execute_transaction, delete_market_entry, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
+            planning_interval=0,
         )
 
     async def a_run(self, task_input: str) -> Any:
