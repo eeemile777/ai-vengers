@@ -1,7 +1,7 @@
 ================================================================================
 PROJECT EXPORT
 ================================================================================
-Generated: 2026-02-28 18:40:12
+Generated: 2026-02-28 19:11:41
 Root Directory: /Users/milo/ai-vengers
 ================================================================================
 
@@ -11,6 +11,7 @@ ai-vengers/
 ├── agents
 │   ├── __init__.py
 │   ├── bidding_pipeline.py
+│   ├── serving_pipeline.py
 │   ├── speaking_pipeline.py
 │   └── waiting_pipeline.py
 ├── core
@@ -28,10 +29,12 @@ ai-vengers/
 │   ├── market_tools.py
 │   └── mcp_wrapper.py
 ├── .env
+├── .gitignore
 ├── CLIENT_TEMPLATE.py
 ├── HACKAPIZZA_MANUAL.md
 ├── INSTRUCTIONS.md
 ├── README.md
+├── debug_mock_event_flow.py
 ├── export_project.py
 ├── main.py
 ├── requirements.txt
@@ -43,6 +46,7 @@ FILE CONTENTS
 ================================================================================
 
 [BINARY/SKIPPED] .env
+[BINARY/SKIPPED] .gitignore
 --------------------------------------------------------------------------------
 FILE: CLIENT_TEMPLATE.py
 --------------------------------------------------------------------------------
@@ -646,6 +650,182 @@ Collaborative project repository
 
 
 --------------------------------------------------------------------------------
+FILE: debug_mock_event_flow.py
+--------------------------------------------------------------------------------
+import argparse
+import asyncio
+import json
+from typing import Any
+
+import main as app
+from memory.state_manager import state_manager
+
+
+async def _fake_get_recipes() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "Margherita",
+            "ingredients": [
+                {"name": "tomato", "quantity": 1},
+                {"name": "mozzarella", "quantity": 1},
+            ],
+        },
+        {
+            "name": "Diavola",
+            "ingredients": [
+                {"name": "tomato", "quantity": 1},
+                {"name": "salami", "quantity": 1},
+            ],
+        },
+    ]
+
+
+async def _fake_get_restaurant() -> dict[str, Any]:
+    return {
+        "id": 999,
+        "name": "Mockapizza",
+        "balance": 2500,
+        "inventory": {
+            "tomato": 20,
+            "mozzarella": 10,
+            "salami": 5,
+        },
+    }
+
+
+async def _fake_get_restaurant_menu() -> dict[str, Any]:
+    return {
+        "items": [
+            {"name": "Margherita", "price": 11},
+            {"name": "Diavola", "price": 13},
+        ]
+    }
+
+
+async def _fake_get_market_entries() -> list[dict[str, Any]]:
+    return [
+        {"id": 1, "side": "SELL", "ingredient_name": "tomato", "quantity": 30, "price": 3.5},
+        {"id": 2, "side": "BUY", "ingredient_name": "mozzarella", "quantity": 10, "price": 5.0},
+    ]
+
+
+async def _fake_get_meals(turn_id: int | None = None) -> list[dict[str, Any]]:
+    return [{"turn_id": turn_id, "dish": "Margherita", "served_to": "C-001"}]
+
+
+async def _fake_send_message(recipient_id: int, text: str) -> dict[str, Any]:
+    print(f"[MOCK_TOOL] send_message -> recipient_id={recipient_id}, text={text}")
+    return {"ok": True, "recipient_id": recipient_id}
+
+
+async def _fake_speaking_run(task_input: str) -> dict[str, Any]:
+    print(f"[MOCK_PIPELINE] speaking input chars={len(task_input)}")
+    return {"ok": True, "phase": "speaking", "action": "save_menu + send_message"}
+
+
+async def _fake_bidding_run(task_input: str) -> dict[str, Any]:
+    print(f"[MOCK_PIPELINE] bidding input chars={len(task_input)}")
+    return {"ok": True, "phase": "closed_bid", "action": "closed_bid"}
+
+
+async def _fake_waiting_run(task_input: str) -> dict[str, Any]:
+    print(f"[MOCK_PIPELINE] waiting input chars={len(task_input)}")
+    return {"ok": True, "phase": "waiting", "action": "market + menu adjustments"}
+
+
+async def _fake_serving_run(task_input: str) -> dict[str, Any]:
+    print(f"[MOCK_PIPELINE] serving input chars={len(task_input)}")
+    return {"ok": True, "phase": "serving", "action": "prepare_dish + serve_dish"}
+
+
+def install_mocks() -> None:
+    app.get_recipes = _fake_get_recipes
+    app.get_restaurant = _fake_get_restaurant
+    app.get_restaurant_menu = _fake_get_restaurant_menu
+    app.get_market_entries = _fake_get_market_entries
+    app.get_meals = _fake_get_meals
+    app.send_message = _fake_send_message
+
+    app.speaking_pipeline.a_run = _fake_speaking_run
+    app.bidding_pipeline.a_run = _fake_bidding_run
+    app.waiting_pipeline.a_run = _fake_waiting_run
+    app.serving_pipeline.a_run = _fake_serving_run
+
+
+def _state_snapshot() -> str:
+    return (
+        f"phase={state_manager.phase}, turn_id={state_manager.turn_id}, "
+        f"clients={len(state_manager.active_clients)}, prepared={len(state_manager.prepared_dishes)}"
+    )
+
+
+async def emit_event(event_type: str, data: dict[str, Any], pause: float) -> None:
+    payload = {"type": event_type, "data": data}
+    line = f"data: {json.dumps(payload)}".encode("utf-8")
+    await app.handle_line(line)
+    await asyncio.sleep(pause)
+    print(f"[SNAPSHOT] {_state_snapshot()}")
+
+
+async def run_mock_flow(pause: float) -> None:
+    install_mocks()
+
+    print("[MOCK] Starting mock event flow")
+    await app.handle_line(b"data: connected")
+    await app.init_static_data()
+
+    await emit_event("game_started", {"turn_id": 777}, pause)
+    await emit_event("message", {"text": "hello teams"}, pause)
+    await emit_event("new_message", {"sender": 12, "text": "ping"}, pause)
+
+    await emit_event(
+        "client_spawned",
+        {
+            "clientId": "C-001",
+            "clientName": "Alice",
+            "orderText": "I want something spicy",
+            "intolerances": ["lactose"],
+        },
+        pause,
+    )
+
+    await emit_event("game_phase_changed", {"phase": "speaking"}, pause)
+    await emit_event("game_phase_changed", {"phase": "closed_bid"}, pause)
+    await emit_event("game_phase_changed", {"phase": "waiting"}, pause)
+
+    await emit_event(
+        "preparation_complete",
+        {
+            "clientId": "C-001",
+            "dish": "Diavola",
+        },
+        pause,
+    )
+
+    await emit_event("game_phase_changed", {"phase": "serving"}, pause)
+    await emit_event("heartbeat", {}, pause)
+    await emit_event("game_phase_changed", {"phase": "stopped"}, pause)
+    await emit_event("game_reset", {}, pause)
+
+    await app.handle_line(b"data: {\"type\": \"unknown_event\", \"data\": {\"x\": 1}}")
+    await asyncio.sleep(pause)
+
+    print("[MOCK] Flow completed")
+    print(f"[FINAL] {_state_snapshot()}")
+
+
+async def main() -> None:
+    parser = argparse.ArgumentParser(description="Run mocked end-to-end Hackapizza event flow")
+    parser.add_argument("--pause", type=float, default=0.15, help="Sleep after each event to let background tasks complete")
+    args = parser.parse_args()
+    await run_mock_flow(pause=args.pause)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
+--------------------------------------------------------------------------------
 FILE: export_project.py
 --------------------------------------------------------------------------------
 #!/usr/bin/env python3
@@ -848,6 +1028,17 @@ import os
 
 os.environ["DATAPIZZA_TRACE_CLIENT_IO"] = "TRUE"
 
+from datapizza.tracing import DatapizzaMonitoringInstrumentor
+
+# Initialize EGEnts Monitoring
+instrumentor = DatapizzaMonitoringInstrumentor(
+    api_key="pmk_0054ee5c93effe0bd7ba01c126aab7a915649050f50711b1",
+    project_id="966909b1-c2c8-44d5-877e-53e69fa1c2ff",
+    endpoint="https://datapizza-monitoring.datapizza.tech/gateway/v1/traces"
+)
+instrumentor.instrument()
+tracer = instrumentor.get_tracer(__name__)
+
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
@@ -866,62 +1057,17 @@ from typing import Any, Awaitable, Callable
 import aiohttp
 
 from agents.bidding_pipeline import bidding_pipeline
+from agents.serving_pipeline import serving_pipeline
 from agents.speaking_pipeline import speaking_pipeline
 from agents.waiting_pipeline import waiting_pipeline
-from core.client import get_llm_client
 from core.config import BASE_URL, TEAM_API_KEY, TEAM_ID
-from core.safety import is_safe_to_cook
 from memory.state_manager import state_manager
-from tools.kitchen_tools import prepare_dish, serve_dish, update_restaurant_is_open
 from tools.market_tools import send_message
 from tools.info_tools import get_market_entries, get_meals, get_recipes, get_restaurant, get_restaurant_menu
-
-llm_semaphore = asyncio.Semaphore(5)
 
 
 def log(tag: str, message: str) -> None:
     print(f"[{tag}] {datetime.now()}: {message}")
-
-
-def _available_dish_names() -> list[str]:
-    dish_names: list[str] = []
-    for recipe in state_manager.recipes:
-        maybe_name = recipe.get("name") or recipe.get("dish_name") or recipe.get("title")
-        if isinstance(maybe_name, str) and maybe_name.strip():
-            dish_names.append(maybe_name.strip())
-    return dish_names
-
-
-def _pick_exact_dish_name(raw_choice: str, available_dishes: list[str]) -> str | None:
-    normalized_choice = raw_choice.strip().lower()
-    if not normalized_choice or normalized_choice == "none":
-        return None
-    for dish_name in available_dishes:
-        if dish_name.lower() == normalized_choice:
-            return dish_name
-    return None
-
-
-async def _choose_dish_with_ai(client_event: dict[str, Any]) -> str | None:
-    available_dishes = _available_dish_names()
-    if not available_dishes:
-        return None
-
-    llm_client = get_llm_client()
-    order_text = client_event.get("orderText", "")
-    client_name = client_event.get("clientName", "unknown")
-
-    prompt = (
-        "You are selecting a dish name for a client order in a restaurant simulation. "
-        f"Client: {client_name}. Order text: {order_text}. "
-        f"Allowed dish names: {available_dishes}. "
-        "Return exactly one dish name from the allowed list, or NONE if no safe match exists. "
-        "Output must be plain text only, no punctuation, no explanation."
-    )
-
-    async with llm_semaphore:
-        response = await llm_client.a_invoke(prompt)
-    return _pick_exact_dish_name(response.text, available_dishes)
 
 
 async def init_static_data() -> None:
@@ -983,14 +1129,27 @@ async def handle_waiting_phase() -> None:
 
 async def handle_serving_phase() -> None:
     log("PHASE", "SERVING PHASE STARTED")
+    context = await gather_all_state()
+    restaurant = context.get("restaurant", {})
+    inventory = restaurant.get("inventory", {}) if isinstance(restaurant, dict) else {}
+    clients = list(state_manager.active_clients.values())
+    prepared = state_manager.prepared_dishes
+    result = await serving_pipeline.a_run(
+        (
+            "We are in serving phase. Act fully autonomously and safely. "
+            f"Live clients: {clients}. "
+            f"Live inventory: {inventory}. "
+            f"Prepared dishes map: {prepared}. "
+            f"Recipes: {state_manager.recipes}. "
+            "Use tools to prepare and serve compatible dishes and close service if no safe option exists."
+        )
+    )
+    log("PIPELINE", str(result))
 
 
 async def handle_stopped_phase() -> None:
     log("PHASE", "STOPPED PHASE STARTED")
     state_manager.reset_turn_state()
-    bidding_pipeline.reset_memory()
-    speaking_pipeline.reset_memory()
-    waiting_pipeline.reset_memory()
     context = await gather_all_state()
     log("STATE", f"Turn closed. Balance: {context['restaurant'].get('balance', 'unknown')}")
 
@@ -1017,9 +1176,8 @@ async def game_phase_changed(data: dict[str, Any]) -> None:
         "stopped": handle_stopped_phase,
     }
 
-    handler = handlers.get(state_manager.phase)
-    if handler:
-        await handler()
+    if handler := handlers.get(state_manager.phase):
+        asyncio.create_task(handler())
     else:
         log("EVENT", f"Unknown phase: {state_manager.phase}")
 
@@ -1027,20 +1185,7 @@ async def game_phase_changed(data: dict[str, Any]) -> None:
 async def client_spawned(data: dict[str, Any]) -> None:
     client_id = str(data.get("clientId", "unknown"))
     state_manager.active_clients[client_id] = data
-    client_intolerances = data.get("intolerances", [])
-
-    ai_dish_choice = await _choose_dish_with_ai(data)
-    
-    if not ai_dish_choice or not is_safe_to_cook(client_intolerances, ai_dish_choice, state_manager.recipes):
-        log("SAFEGUARD", f"Cannot serve client {client_id} safely. HITTING PANIC BUTTON.")
-        await update_restaurant_is_open(False)
-        return
-
-    result = await prepare_dish(ai_dish_choice)
-    if result.get("ok"):
-        log("CHEF", f"Preparing safe dish '{ai_dish_choice}' for client {client_id}")
-    else:
-        log("CHEF_ERROR", f"prepare_dish failed for '{ai_dish_choice}': {result.get('error')}")
+    log("EVENT", f"CLIENT SPAWNED - client_id={client_id}")
 
 
 async def preparation_complete(data: dict[str, Any]) -> None:
@@ -1048,16 +1193,7 @@ async def preparation_complete(data: dict[str, Any]) -> None:
     client_id = str(data.get("clientId", "unknown"))
     if dish_name:
         state_manager.prepared_dishes[client_id] = dish_name
-        client_event = state_manager.active_clients.get(client_id, {})
-        client_intolerances = client_event.get("intolerances", [])
-        if is_safe_to_cook(client_intolerances, dish_name, state_manager.recipes):
-            result = await serve_dish(dish_name, client_id)
-            if result.get("ok"):
-                log("SERVE", f"Served safe dish '{dish_name}' to client {client_id}")
-            else:
-                log("SERVE_ERROR", f"serve_dish failed for '{dish_name}': {result.get('error')}")
-        else:
-            log("SAFEGUARD", f"Blocked unsafe serve for dish '{dish_name}' and client {client_id}")
+    log("EVENT", f"PREPARATION COMPLETE - client_id={client_id}, dish={dish_name}")
 
 
 async def message(data: dict[str, Any]) -> None:
@@ -1066,8 +1202,7 @@ async def message(data: dict[str, Any]) -> None:
 
 async def new_message(data: dict[str, Any]) -> None:
     log("DIRECT_MSG", f"Direct message received: {data}")
-    sender = data.get("sender", 0)
-    if sender:
+    if sender := data.get("sender", 0):
         await send_message(int(sender), "Message received.")
 
 
@@ -1314,10 +1449,12 @@ FILE: tools/kitchen_tools.py
 --------------------------------------------------------------------------------
 from typing import Any
 
+from datapizza.tools import Tool
+
 from .mcp_wrapper import call_mcp_tool
 
 
-async def prepare_dish(dish_name: str) -> dict[str, Any]:
+async def _prepare_dish(dish_name: str) -> dict[str, Any]:
     """
     Format: {"dish_name": string}
     Avvia la preparazione di un piatto. Allowed only in serving phase.
@@ -1325,7 +1462,7 @@ async def prepare_dish(dish_name: str) -> dict[str, Any]:
     return await call_mcp_tool("prepare_dish", {"dish_name": dish_name})
 
 
-async def serve_dish(dish_name: str, client_id: str) -> dict[str, Any]:
+async def _serve_dish(dish_name: str, client_id: str) -> dict[str, Any]:
     """
     Format: {"dish_name": string, "client_id": string}
     Serve a prepared dish to the specified client.
@@ -1333,7 +1470,7 @@ async def serve_dish(dish_name: str, client_id: str) -> dict[str, Any]:
     return await call_mcp_tool("serve_dish", {"dish_name": dish_name, "client_id": client_id})
 
 
-async def update_restaurant_is_open(is_open: bool) -> dict[str, Any]:
+async def _update_restaurant_is_open(is_open: bool) -> dict[str, Any]:
     """
     Format: {"is_open": boolean}
     Open or close restaurant service as a safety control.
@@ -1341,15 +1478,45 @@ async def update_restaurant_is_open(is_open: bool) -> dict[str, Any]:
     return await call_mcp_tool("update_restaurant_is_open", {"is_open": is_open})
 
 
+prepare_dish = Tool(
+    func=_prepare_dish,
+    name="prepare_dish",
+    description=(
+        "Start preparing a dish during serving phase. "
+        "Input JSON schema: {\"dish_name\": string}."
+    ),
+)
+
+serve_dish = Tool(
+    func=_serve_dish,
+    name="serve_dish",
+    description=(
+        "Serve a prepared dish to a specific client. "
+        "Input JSON schema: {\"dish_name\": string, \"client_id\": string}."
+    ),
+)
+
+update_restaurant_is_open = Tool(
+    func=_update_restaurant_is_open,
+    name="update_restaurant_is_open",
+    description=(
+        "Open or close restaurant service for safety control. "
+        "Input JSON schema: {\"is_open\": boolean}."
+    ),
+)
+
+
 --------------------------------------------------------------------------------
 FILE: tools/market_tools.py
 --------------------------------------------------------------------------------
 from typing import Any
 
+from datapizza.tools import Tool
+
 from .mcp_wrapper import call_mcp_tool
 
 
-async def create_market_entry(side: str, ingredient_name: str, quantity: int, price: float) -> dict[str, Any]:
+async def _create_market_entry(side: str, ingredient_name: str, quantity: int, price: float) -> dict[str, Any]:
     """
     Format: {"side": "BUY"|"SELL", "ingredient_name": string, "quantity": int, "price": float}
     Create a public market entry to buy or sell ingredients.
@@ -1365,7 +1532,7 @@ async def create_market_entry(side: str, ingredient_name: str, quantity: int, pr
     )
 
 
-async def execute_transaction(market_entry_id: int) -> dict[str, Any]:
+async def _execute_transaction(market_entry_id: int) -> dict[str, Any]:
     """
     Format: {"market_entry_id": int}
     Execute a transaction against an existing market entry.
@@ -1373,7 +1540,7 @@ async def execute_transaction(market_entry_id: int) -> dict[str, Any]:
     return await call_mcp_tool("execute_transaction", {"market_entry_id": market_entry_id})
 
 
-async def delete_market_entry(market_entry_id: int) -> dict[str, Any]:
+async def _delete_market_entry(market_entry_id: int) -> dict[str, Any]:
     """
     Format: {"market_entry_id": int}
     Delete one of our own market entries.
@@ -1381,7 +1548,7 @@ async def delete_market_entry(market_entry_id: int) -> dict[str, Any]:
     return await call_mcp_tool("delete_market_entry", {"market_entry_id": market_entry_id})
 
 
-async def closed_bid(bids: list[dict[str, Any]]) -> dict[str, Any]:
+async def _closed_bid(bids: list[dict[str, Any]]) -> dict[str, Any]:
     """
     Format: {"bids": [{"ingredient": string, "bid": number, "quantity": number}, ...]}
     Submit the turn's blind auction bid payload.
@@ -1389,7 +1556,7 @@ async def closed_bid(bids: list[dict[str, Any]]) -> dict[str, Any]:
     return await call_mcp_tool("closed_bid", {"bids": bids})
 
 
-async def save_menu(items: list[dict[str, Any]]) -> dict[str, Any]:
+async def _save_menu(items: list[dict[str, Any]]) -> dict[str, Any]:
     """
     Format: {"items": [{"name": string, "price": number}, ...]}
     Save or replace the current restaurant menu.
@@ -1397,12 +1564,67 @@ async def save_menu(items: list[dict[str, Any]]) -> dict[str, Any]:
     return await call_mcp_tool("save_menu", {"items": items})
 
 
-async def send_message(recipient_id: int, text: str) -> dict[str, Any]:
+async def _send_message(recipient_id: int, text: str) -> dict[str, Any]:
     """
     Format: {"recipient_id": number, "text": string}
     Send a direct message to another team.
     """
     return await call_mcp_tool("send_message", {"recipient_id": recipient_id, "text": text})
+
+
+create_market_entry = Tool(
+    func=_create_market_entry,
+    name="create_market_entry",
+    description=(
+        "Create a public market entry to buy or sell ingredients. "
+        "Input JSON schema: {\"side\": \"BUY\"|\"SELL\", \"ingredient_name\": string, \"quantity\": integer > 0, \"price\": number > 0}."
+    ),
+)
+
+execute_transaction = Tool(
+    func=_execute_transaction,
+    name="execute_transaction",
+    description=(
+        "Execute a transaction against an existing market entry. "
+        "Input JSON schema: {\"market_entry_id\": integer}."
+    ),
+)
+
+delete_market_entry = Tool(
+    func=_delete_market_entry,
+    name="delete_market_entry",
+    description=(
+        "Delete one of our own market entries. "
+        "Input JSON schema: {\"market_entry_id\": integer}."
+    ),
+)
+
+closed_bid = Tool(
+    func=_closed_bid,
+    name="closed_bid",
+    description=(
+        "Submit the turn blind auction bid payload. "
+        "Input JSON schema: {\"bids\": [{\"ingredient\": string, \"bid\": number >= 0, \"quantity\": number > 0}, ...]}."
+    ),
+)
+
+save_menu = Tool(
+    func=_save_menu,
+    name="save_menu",
+    description=(
+        "Save or replace the current restaurant menu. "
+        "Input JSON schema: {\"items\": [{\"name\": string, \"price\": number >= 0}, ...]}."
+    ),
+)
+
+send_message = Tool(
+    func=_send_message,
+    name="send_message",
+    description=(
+        "Send a direct message to another team. "
+        "Input JSON schema: {\"recipient_id\": integer, \"text\": string}."
+    ),
+)
 
 
 --------------------------------------------------------------------------------
@@ -1668,10 +1890,11 @@ state_manager = StateManager()
 FILE: agents/__init__.py
 --------------------------------------------------------------------------------
 from .bidding_pipeline import bidding_pipeline
+from .serving_pipeline import serving_pipeline
 from .speaking_pipeline import speaking_pipeline
 from .waiting_pipeline import waiting_pipeline
 
-__all__ = ["speaking_pipeline", "bidding_pipeline", "waiting_pipeline"]
+__all__ = ["speaking_pipeline", "bidding_pipeline", "waiting_pipeline", "serving_pipeline"]
 
 
 --------------------------------------------------------------------------------
@@ -1700,6 +1923,7 @@ class BiddingPipeline:
             client=llm_client,
             system_prompt=BIDDING_SYSTEM_PROMPT,
             tools=[closed_bid],
+            planning_interval=1,
         )
 
     def reset_memory(self) -> None:
@@ -1709,16 +1933,75 @@ class BiddingPipeline:
             client=llm_client,
             system_prompt=BIDDING_SYSTEM_PROMPT,
             tools=[closed_bid],
+            planning_interval=1,
         )
 
     async def a_run(self, task_input: str) -> Any:
         return await self.phase_agent.a_run(
             task_input=task_input,
-            tool_choice="required",
+            tool_choice="auto",
         )
 
 
 bidding_pipeline = BiddingPipeline()
+
+
+--------------------------------------------------------------------------------
+FILE: agents/serving_pipeline.py
+--------------------------------------------------------------------------------
+from typing import Any
+
+from datapizza.agents.agent import Agent
+from datapizza.clients.openai_like import OpenAILikeClient
+
+from core.config import REGOLO_API_KEY
+from tools.kitchen_tools import prepare_dish, serve_dish, update_restaurant_is_open
+
+
+SERVING_SYSTEM_PROMPT = """
+You operate only during the serving phase.
+You must autonomously verify client intolerances against requested/selected dishes,
+prepare safe dishes, serve only safe prepared dishes, and close service with
+update_restaurant_is_open(false) when no safe service path exists.
+Allowed actions: prepare_dish, serve_dish, update_restaurant_is_open.
+Do not use any other tools.
+""".strip()
+
+
+class ServingPipeline:
+    def __init__(self) -> None:
+        llm_client = OpenAILikeClient(
+            api_key=REGOLO_API_KEY,
+            model="gpt-oss-120b",
+            base_url="https://api.regolo.ai/v1",
+        )
+        self.phase_agent = Agent(
+            name="serving_phase_agent",
+            client=llm_client,
+            system_prompt=SERVING_SYSTEM_PROMPT,
+            tools=[prepare_dish, serve_dish, update_restaurant_is_open],
+            planning_interval=1,
+        )
+
+    def reset_memory(self) -> None:
+        llm_client = OpenAILikeClient(
+            api_key=REGOLO_API_KEY,
+            model="gpt-oss-120b",
+            base_url="https://api.regolo.ai/v1",
+        )
+        self.phase_agent = Agent(
+            name="serving_phase_agent",
+            client=llm_client,
+            system_prompt=SERVING_SYSTEM_PROMPT,
+            tools=[prepare_dish, serve_dish, update_restaurant_is_open],
+            planning_interval=1,
+        )
+
+    async def a_run(self, task_input: str) -> Any:
+        return await self.phase_agent.a_run(task_input=task_input)
+
+
+serving_pipeline = ServingPipeline()
 
 
 --------------------------------------------------------------------------------
@@ -1747,6 +2030,7 @@ class SpeakingPipeline:
             client=llm_client,
             system_prompt=SPEAKING_SYSTEM_PROMPT,
             tools=[send_message, save_menu],
+            planning_interval=1,
         )
 
     def reset_memory(self) -> None:
@@ -1756,6 +2040,7 @@ class SpeakingPipeline:
             client=llm_client,
             system_prompt=SPEAKING_SYSTEM_PROMPT,
             tools=[send_message, save_menu],
+            planning_interval=1,
         )
 
     async def a_run(self, task_input: str) -> Any:
@@ -1796,6 +2081,7 @@ class WaitingPipeline:
             client=llm_client,
             system_prompt=WAITING_SYSTEM_PROMPT,
             tools=[save_menu, create_market_entry, execute_transaction, delete_market_entry],
+            planning_interval=1,
         )
 
     def reset_memory(self) -> None:
@@ -1805,6 +2091,7 @@ class WaitingPipeline:
             client=llm_client,
             system_prompt=WAITING_SYSTEM_PROMPT,
             tools=[save_menu, create_market_entry, execute_transaction, delete_market_entry],
+            planning_interval=1,
         )
 
     async def a_run(self, task_input: str) -> Any:
@@ -1815,5 +2102,5 @@ waiting_pipeline = WaitingPipeline()
 
 
 ================================================================================
-Export complete. 22 files exported.
+Export complete. 24 files exported.
 ================================================================================

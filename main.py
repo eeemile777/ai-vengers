@@ -31,133 +31,60 @@ from typing import Any, Awaitable, Callable
 import aiohttp
 
 from agents.bidding_pipeline import bidding_pipeline
+from agents.serving_pipeline import serving_pipeline
 from agents.speaking_pipeline import speaking_pipeline
 from agents.waiting_pipeline import waiting_pipeline
-from core.client import get_llm_client
 from core.config import BASE_URL, TEAM_API_KEY, TEAM_ID
-from core.safety import is_safe_to_cook
 from memory.state_manager import state_manager
-from tools.kitchen_tools import prepare_dish, serve_dish, update_restaurant_is_open
 from tools.market_tools import send_message
-from tools.info_tools import get_market_entries, get_meals, get_recipes, get_restaurant, get_restaurant_menu
-
-llm_semaphore = asyncio.Semaphore(5)
 
 
 def log(tag: str, message: str) -> None:
     print(f"[{tag}] {datetime.now()}: {message}")
 
 
-def _available_dish_names() -> list[str]:
-    dish_names: list[str] = []
-    for recipe in state_manager.recipes:
-        maybe_name = recipe.get("name") or recipe.get("dish_name") or recipe.get("title")
-        if isinstance(maybe_name, str) and maybe_name.strip():
-            dish_names.append(maybe_name.strip())
-    return dish_names
-
-
-def _pick_exact_dish_name(raw_choice: str, available_dishes: list[str]) -> str | None:
-    normalized_choice = raw_choice.strip().lower()
-    if not normalized_choice or normalized_choice == "none":
-        return None
-    for dish_name in available_dishes:
-        if dish_name.lower() == normalized_choice:
-            return dish_name
-    return None
-
-
-async def _choose_dish_with_ai(client_event: dict[str, Any]) -> str | None:
-    available_dishes = _available_dish_names()
-    if not available_dishes:
-        return None
-
-    llm_client = get_llm_client()
-    order_text = client_event.get("orderText", "")
-    client_name = client_event.get("clientName", "unknown")
-
-    prompt = (
-        "You are selecting a dish name for a client order in a restaurant simulation. "
-        f"Client: {client_name}. Order text: {order_text}. "
-        f"Allowed dish names: {available_dishes}. "
-        "Return exactly one dish name from the allowed list, or NONE if no safe match exists. "
-        "Output must be plain text only, no punctuation, no explanation."
-    )
-
-    async with llm_semaphore:
-        response = await llm_client.a_invoke(prompt)
-    return _pick_exact_dish_name(response.text, available_dishes)
-
-
 async def init_static_data() -> None:
+    from tools.info_tools import get_recipes
     state_manager.recipes = await get_recipes()
     log("INIT", f"Static recipes cached: {len(state_manager.recipes)}")
 
 
-async def gather_all_state() -> dict[str, Any]:
-    restaurant, menu, market, meals = await asyncio.gather(
-        get_restaurant(),
-        get_restaurant_menu(),
-        get_market_entries(),
-        get_meals(state_manager.turn_id or None),
-    )
-    lite_recipes = [
-        {
-            "name": recipe.get("name") or recipe.get("dish_name"),
-            "ingredients": recipe.get("ingredients") or recipe.get("required_ingredients"),
-        }
-        for recipe in state_manager.recipes
-    ]
-    return {
-        "turn_id": state_manager.turn_id,
-        "phase": state_manager.phase,
-        "restaurant": restaurant,
-        "menu": menu,
-        "recipes": lite_recipes,
-        "market_entries": market,
-        "meals": meals,
-    }
-
-
 async def handle_speaking_phase() -> None:
     log("PHASE", "SPEAKING PHASE STARTED")
-    context = await gather_all_state()
     result = await speaking_pipeline.a_run(
-        f"We are in speaking phase. Live state: {context}. Publish an initial menu and optionally send alliance messages."
+        "We are in the speaking phase. Use your tools to check the restaurant and market, then publish an initial menu and optionally send alliance messages."
     )
     log("PIPELINE", str(result))
 
 
 async def handle_closed_bid_phase() -> None:
     log("PHASE", "CLOSED_BID PHASE STARTED")
-    context = await gather_all_state()
     result = await bidding_pipeline.a_run(
-        f"We are in closed_bid phase. Live state: {context}. Submit exactly one optimized closed_bid and no waiting-only actions."
+        "We are in the closed_bid phase. Use your tools to check market and restaurant state, then submit exactly one optimized closed_bid."
     )
     log("PIPELINE", str(result))
 
 
 async def handle_waiting_phase() -> None:
     log("PHASE", "WAITING PHASE STARTED")
-    context = await gather_all_state()
     result = await waiting_pipeline.a_run(
-        f"We are in waiting phase. Live state: {context}. Update the menu to feasible dishes and buy/sell missing or excess ingredients."
+        "We are in the waiting phase. Use your tools to check restaurant inventory and market entries, then update the menu to feasible dishes and buy/sell missing or excess ingredients as needed."
     )
     log("PIPELINE", str(result))
 
 
 async def handle_serving_phase() -> None:
     log("PHASE", "SERVING PHASE STARTED")
+    result = await serving_pipeline.a_run(
+        "We are in the serving phase. Use your tools to check active clients and prepared dishes. Prepare safe dishes, wait for them to be marked as ready, and serve them. Close service if no safe serving path exists."
+    )
+    log("PIPELINE", str(result))
 
 
 async def handle_stopped_phase() -> None:
     log("PHASE", "STOPPED PHASE STARTED")
     state_manager.reset_turn_state()
-    bidding_pipeline.reset_memory()
-    speaking_pipeline.reset_memory()
-    waiting_pipeline.reset_memory()
-    context = await gather_all_state()
-    log("STATE", f"Turn closed. Balance: {context['restaurant'].get('balance', 'unknown')}")
+    log("STATE", "Turn closed and state reset")
 
 
 ##########################################################################################
@@ -182,9 +109,8 @@ async def game_phase_changed(data: dict[str, Any]) -> None:
         "stopped": handle_stopped_phase,
     }
 
-    handler = handlers.get(state_manager.phase)
-    if handler:
-        await handler()
+    if handler := handlers.get(state_manager.phase):
+        asyncio.create_task(handler())
     else:
         log("EVENT", f"Unknown phase: {state_manager.phase}")
 
@@ -192,20 +118,7 @@ async def game_phase_changed(data: dict[str, Any]) -> None:
 async def client_spawned(data: dict[str, Any]) -> None:
     client_id = str(data.get("clientId", "unknown"))
     state_manager.active_clients[client_id] = data
-    client_intolerances = data.get("intolerances", [])
-
-    ai_dish_choice = await _choose_dish_with_ai(data)
-    
-    if not ai_dish_choice or not is_safe_to_cook(client_intolerances, ai_dish_choice, state_manager.recipes):
-        log("SAFEGUARD", f"Cannot serve client {client_id} safely. HITTING PANIC BUTTON.")
-        await update_restaurant_is_open(False)
-        return
-
-    result = await prepare_dish(ai_dish_choice)
-    if result.get("ok"):
-        log("CHEF", f"Preparing safe dish '{ai_dish_choice}' for client {client_id}")
-    else:
-        log("CHEF_ERROR", f"prepare_dish failed for '{ai_dish_choice}': {result.get('error')}")
+    log("EVENT", f"CLIENT SPAWNED - client_id={client_id}")
 
 
 async def preparation_complete(data: dict[str, Any]) -> None:
@@ -213,16 +126,7 @@ async def preparation_complete(data: dict[str, Any]) -> None:
     client_id = str(data.get("clientId", "unknown"))
     if dish_name:
         state_manager.prepared_dishes[client_id] = dish_name
-        client_event = state_manager.active_clients.get(client_id, {})
-        client_intolerances = client_event.get("intolerances", [])
-        if is_safe_to_cook(client_intolerances, dish_name, state_manager.recipes):
-            result = await serve_dish(dish_name, client_id)
-            if result.get("ok"):
-                log("SERVE", f"Served safe dish '{dish_name}' to client {client_id}")
-            else:
-                log("SERVE_ERROR", f"serve_dish failed for '{dish_name}': {result.get('error')}")
-        else:
-            log("SAFEGUARD", f"Blocked unsafe serve for dish '{dish_name}' and client {client_id}")
+    log("EVENT", f"PREPARATION COMPLETE - client_id={client_id}, dish={dish_name}")
 
 
 async def message(data: dict[str, Any]) -> None:
@@ -231,8 +135,7 @@ async def message(data: dict[str, Any]) -> None:
 
 async def new_message(data: dict[str, Any]) -> None:
     log("DIRECT_MSG", f"Direct message received: {data}")
-    sender = data.get("sender", 0)
-    if sender:
+    if sender := data.get("sender", 0):
         await send_message(int(sender), "Message received.")
 
 

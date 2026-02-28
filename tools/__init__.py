@@ -5,7 +5,7 @@ from .info_tools import (
     get_restaurant,
     get_restaurant_menu,
 )
-from .kitchen_tools import prepare_dish, serve_dish, update_restaurant_is_open
+from .kitchen_tools import prepare_dish, serve_dish, update_restaurant_is_open, wait_for_dish
 from .market_tools import (
     closed_bid,
     create_market_entry,
@@ -25,6 +25,7 @@ __all__ = [
     "prepare_dish",
     "serve_dish",
     "update_restaurant_is_open",
+    "wait_for_dish",
     "get_restaurant",
     "get_restaurant_menu",
     "get_recipes",

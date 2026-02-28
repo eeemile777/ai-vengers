@@ -3,6 +3,7 @@ from typing import Any
 import asyncio
 
 import aiohttp
+from datapizza.tools import Tool
 
 from core.config import BASE_URL, TEAM_API_KEY, TEAM_ID
 
@@ -41,7 +42,7 @@ async def _get(path: str, params: dict[str, Any] | None = None) -> Any:
             raise
 
 
-async def get_restaurant(restaurant_id: int | str = TEAM_ID) -> dict[str, Any]:
+async def _get_restaurant(restaurant_id: int | str = TEAM_ID) -> dict[str, Any]:
     """
     GET /restaurant/:id
     Returns the live restaurant state including balance and inventory.
@@ -49,7 +50,7 @@ async def get_restaurant(restaurant_id: int | str = TEAM_ID) -> dict[str, Any]:
     return await _get(f"/restaurant/{restaurant_id}")
 
 
-async def get_restaurant_menu(restaurant_id: int | str = TEAM_ID) -> dict[str, Any]:
+async def _get_restaurant_menu(restaurant_id: int | str = TEAM_ID) -> dict[str, Any]:
     """
     GET /restaurant/:id/menu
     Returns menu items currently published by the restaurant.
@@ -57,7 +58,7 @@ async def get_restaurant_menu(restaurant_id: int | str = TEAM_ID) -> dict[str, A
     return await _get(f"/restaurant/{restaurant_id}/menu")
 
 
-async def get_recipes() -> list[dict[str, Any]]:
+async def _get_recipes() -> list[dict[str, Any]]:
     """
     GET /recipes
     Returns all recipes and their required ingredients.
@@ -65,7 +66,7 @@ async def get_recipes() -> list[dict[str, Any]]:
     return await _get("/recipes")
 
 
-async def get_market_entries() -> list[dict[str, Any]]:
+async def _get_market_entries() -> list[dict[str, Any]]:
     """
     GET /market/entries
     Returns active public market orders.
@@ -73,7 +74,7 @@ async def get_market_entries() -> list[dict[str, Any]]:
     return await _get("/market/entries")
 
 
-async def get_meals(turn_id: int | None = None) -> list[dict[str, Any]]:
+async def _get_meals(turn_id: int | None = None) -> list[dict[str, Any]]:
     """
     GET /meals
     Returns meals for current team; when provided, filters by turn.
@@ -82,3 +83,54 @@ async def get_meals(turn_id: int | None = None) -> list[dict[str, Any]]:
     if turn_id is not None:
         params["turn_id"] = turn_id
     return await _get("/meals", params=params)
+
+
+get_restaurant = Tool(
+    func=_get_restaurant,
+    name="get_restaurant",
+    description=(
+        "Fetch the current restaurant state including balance, inventory, and operational status. "
+        "Call this to check available ingredients and financial resources. "
+        "Input JSON schema: {\"restaurant_id\": integer or string, optional, defaults to current team}."
+    ),
+)
+
+get_restaurant_menu = Tool(
+    func=_get_restaurant_menu,
+    name="get_restaurant_menu",
+    description=(
+        "Fetch the current restaurant menu items and their prices. "
+        "Call this to check what dishes are currently listed for sale. "
+        "Input JSON schema: {\"restaurant_id\": integer or string, optional, defaults to current team}."
+    ),
+)
+
+get_recipes = Tool(
+    func=_get_recipes,
+    name="get_recipes",
+    description=(
+        "Fetch all available recipes and their required ingredients. "
+        "Call this to understand what dishes can be prepared and what ingredients are needed. "
+        "Input JSON schema: {} (no parameters)."
+    ),
+)
+
+get_market_entries = Tool(
+    func=_get_market_entries,
+    name="get_market_entries",
+    description=(
+        "Fetch all active public market orders (buy and sell entries from other teams). "
+        "Call this to identify trading opportunities. "
+        "Input JSON schema: {} (no parameters)."
+    ),
+)
+
+get_meals = Tool(
+    func=_get_meals,
+    name="get_meals",
+    description=(
+        "Fetch meal records for the current team, optionally filtered by turn. "
+        "Call this to review served meals and performance history. "
+        "Input JSON schema: {\"turn_id\": integer, optional}."
+    ),
+)
