@@ -1,23 +1,41 @@
 ================================================================================
 PROJECT EXPORT
 ================================================================================
-Generated: 2026-02-28 12:25:33
+Generated: 2026-02-28 18:40:12
 Root Directory: /Users/milo/ai-vengers
 ================================================================================
 
 DIRECTORY STRUCTURE
 --------------------------------------------------------------------------------
 ai-vengers/
+├── agents
+│   ├── __init__.py
+│   ├── bidding_pipeline.py
+│   ├── speaking_pipeline.py
+│   └── waiting_pipeline.py
+├── core
+│   ├── __init__.py
+│   ├── client.py
+│   ├── config.py
+│   └── safety.py
+├── memory
+│   ├── __init__.py
+│   └── state_manager.py
+├── tools
+│   ├── __init__.py
+│   ├── info_tools.py
+│   ├── kitchen_tools.py
+│   ├── market_tools.py
+│   └── mcp_wrapper.py
 ├── .env
 ├── CLIENT_TEMPLATE.py
 ├── HACKAPIZZA_MANUAL.md
 ├── INSTRUCTIONS.md
 ├── README.md
-├── api.py
-├── brain.py
 ├── export_project.py
 ├── main.py
-└── requirements.txt
+├── requirements.txt
+└── test.ipynb
 
 ================================================================================
 
@@ -628,406 +646,6 @@ Collaborative project repository
 
 
 --------------------------------------------------------------------------------
-FILE: api.py
---------------------------------------------------------------------------------
-# /// script
-# requires-python = ">=3.11"
-# dependencies = [
-#     "aiohttp",
-#     "python-dotenv"
-# ]
-# ///
-
-import asyncio
-import os
-import uuid
-from typing import Any
-
-import aiohttp
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
-
-TEAM_ID = int(os.getenv("TEAM_ID", "0"))
-TEAM_API_KEY = os.getenv("TEAM_API_KEY", "your_team_api_key")
-BASE_URL = "https://hackapizza.datapizza.tech"
-restaurant_id = str(TEAM_ID)
-
-
-class MCPClient:
-    """
-    Wrapper for executing actions via the Model Context Protocol (MCP).
-    All tool executions must go through POST /mcp with JSON-RPC format.
-    """
-
-    def __init__(self, base_url: str, api_key: str):
-        self.base_url = base_url
-        self.api_key = api_key
-
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Execute a tool via the MCP endpoint"""
-        from main import log
-        
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {"name": tool_name, "arguments": arguments},
-            "id": str(uuid.uuid4()),
-        }
-
-        headers = {"x-api-key": self.api_key, "Content-Type": "application/json"}
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.base_url}/mcp", json=payload, headers=headers
-                ) as resp:
-                    # Handle rate limiting
-                    if resp.status == 429:
-                        log("MCP_ERROR", f"{tool_name} rate limited (429). Backing off.")
-                        await asyncio.sleep(1)  # Back off for 1 second
-                        return {"success": False, "error": "Rate limit exceeded"}
-                    
-                    result = await resp.json()
-                    
-                    # Parse MCP response according to official spec
-                    # Success: result.isError = false
-                    # Error: result.isError = true, error in result.content.text
-                    if result.get("result", {}).get("isError", False):
-                        error_msg = result.get("result", {}).get("content", {}).get("text", "Unknown error")
-                        log("MCP_ERROR", f"{tool_name} failed: {error_msg}")
-                        return {"success": False, "error": error_msg}
-                    
-                    log("MCP", f"{tool_name} executed successfully")
-                    return {"success": True, "result": result}
-        except Exception as exc:
-            log("MCP_ERROR", f"{tool_name} exception: {exc}")
-            return {"success": False, "error": str(exc)}
-
-    # Convenience methods for each tool (OFFICIAL SPEC FORMATS)
-    async def save_menu(self, menu_items: list[dict[str, Any]]) -> dict[str, Any]:
-        """Format: [{"name": string, "price": number}, ...]"""
-        return await self.call_tool("save_menu", {"items": menu_items})
-
-    async def closed_bid(self, ingredients: list[dict[str, Any]]) -> dict[str, Any]:
-        """Format: [{"ingredient": string, "bid": number, "quantity": number}, ...]
-        CRITICAL: Only the LAST submission per turn is valid!"""
-        return await self.call_tool("closed_bid", {"bids": ingredients})
-
-    async def create_market_entry(
-        self, side: str, ingredient_name: str, quantity: int, price: float
-    ) -> dict[str, Any]:
-        """Format: {"side": "BUY" | "SELL", "ingredient_name": string, "quantity": int, "price": float}
-        Side effect: Triggers broadcast 'message' SSE"""
-        return await self.call_tool(
-            "create_market_entry",
-            {
-                "side": side.upper(),  # Must be "BUY" or "SELL"
-                "ingredient_name": ingredient_name,
-                "quantity": quantity,
-                "price": price,
-            },
-        )
-
-    async def execute_transaction(self, market_entry_id: int) -> dict[str, Any]:
-        """Execute a market transaction"""
-        return await self.call_tool("execute_transaction", {"market_entry_id": market_entry_id})
-
-    async def delete_market_entry(self, market_entry_id: int) -> dict[str, Any]:
-        """Delete a market entry"""
-        return await self.call_tool("delete_market_entry", {"market_entry_id": market_entry_id})
-
-    async def prepare_dish(self, dish_name: str) -> dict[str, Any]:
-        """Format: {"dish_name": string}"""
-        return await self.call_tool("prepare_dish", {"dish_name": dish_name})
-
-    async def serve_dish(self, dish_name: str, client_id: str) -> dict[str, Any]:
-        """Format: {"dish_name": string, "client_id": string}"""
-        return await self.call_tool("serve_dish", {"dish_name": dish_name, "client_id": client_id})
-
-    async def update_restaurant_is_open(self, is_open: bool) -> dict[str, Any]:
-        """Format: {"is_open": boolean}"""
-        return await self.call_tool("update_restaurant_is_open", {"is_open": is_open})
-
-    async def send_message(self, recipient_id: int, text: str) -> dict[str, Any]:
-        """Format: {"recipient_id": number, "text": string}
-        Side effect: Triggers 'new_message' SSE to recipient"""
-        return await self.call_tool("send_message", {"recipient_id": recipient_id, "text": text})
-
-
-# Initialize MCP client
-mcp_client = MCPClient(BASE_URL, TEAM_API_KEY)
-
-
-##########################################################################################
-#                          STATE GATHERING (READ-ONLY ENDPOINTS)                         #
-##########################################################################################
-
-
-async def get_restaurant_state() -> dict[str, Any]:
-    """Fetch current restaurant state including inventory and balance"""
-    from main import log
-    
-    headers = {"x-api-key": TEAM_API_KEY}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"{BASE_URL}/restaurant/{restaurant_id}", headers=headers
-            ) as resp:
-                return await resp.json()
-    except Exception as exc:
-        log("API_ERROR", f"get_restaurant_state failed: {exc}")
-        return {}
-
-
-async def get_menu() -> dict[str, Any]:
-    """Fetch current menu"""
-    from main import log
-    
-    headers = {"x-api-key": TEAM_API_KEY}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"{BASE_URL}/restaurant/{restaurant_id}/menu", headers=headers
-            ) as resp:
-                return await resp.json()
-    except Exception as exc:
-        log("API_ERROR", f"get_menu failed: {exc}")
-        return {}
-
-
-async def get_recipes() -> list[dict[str, Any]]:
-    """Fetch available recipes, required ingredients, and cooking times"""
-    from main import log
-    
-    headers = {"x-api-key": TEAM_API_KEY}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{BASE_URL}/recipes", headers=headers) as resp:
-                return await resp.json()
-    except Exception as exc:
-        log("API_ERROR", f"get_recipes failed: {exc}")
-        return []
-
-
-async def get_meals(turn_id: int) -> list[dict[str, Any]]:
-    """Fetch client orders to be served"""
-    from main import log
-    
-    headers = {"x-api-key": TEAM_API_KEY}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"{BASE_URL}/meals?turn_id={turn_id}&restaurant_id={restaurant_id}",
-                headers=headers,
-            ) as resp:
-                return await resp.json()
-    except Exception as exc:
-        log("API_ERROR", f"get_meals failed: {exc}")
-        return []
-
-
-async def get_market_entries() -> list[dict[str, Any]]:
-    """Fetch active market trades"""
-    from main import log
-    
-    headers = {"x-api-key": TEAM_API_KEY}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{BASE_URL}/market/entries", headers=headers) as resp:
-                return await resp.json()
-    except Exception as exc:
-        log("API_ERROR", f"get_market_entries failed: {exc}")
-        return []
-
-
-async def get_bid_history(turn_id: int) -> list[dict[str, Any]]:
-    """Fetch past closed bids"""
-    from main import log
-    
-    headers = {"x-api-key": TEAM_API_KEY}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"{BASE_URL}/bid_history?turn_id={turn_id}", headers=headers
-            ) as resp:
-                return await resp.json()
-    except Exception as exc:
-        log("API_ERROR", f"get_bid_history failed: {exc}")
-        return []
-
-
---------------------------------------------------------------------------------
-FILE: brain.py
---------------------------------------------------------------------------------
-# /// script
-# requires-python = ">=3.11"
-# dependencies = [
-#     "datapizza-ai",
-#     "datapizza-ai-clients-openai-like",
-#     "python-dotenv"
-# ]
-# ///
-
-import json
-import os
-from typing import Any
-
-from dotenv import load_dotenv
-
-# CRITICAL: Set tracing BEFORE importing datapizza.clients
-os.environ["DATAPIZZA_TRACE_CLIENT_IO"] = "TRUE"
-
-# Load environment variables
-load_dotenv()
-
-# Initialize the Regolo.ai LLM
-from datapizza.clients.openai_like import OpenAILikeClient
-
-llm_client = OpenAILikeClient(
-    api_key=os.getenv("REGOLO_API_KEY"),
-    model="gpt-oss-120b",
-    base_url="https://api.regolo.ai/v1",
-)
-
-
-##########################################################################################
-#                         AI DECISION-MAKING ENGINE                                      #
-##########################################################################################
-
-
-async def make_order_decision(order_context: dict[str, Any]) -> dict[str, Any]:
-    """
-    Use LLM to intelligently parse a client's order.
-    Match order text to menu, verify intolerances, determine if we can serve.
-    DO NOT use naive string replace - let the LLM understand complex orders.
-    """
-    from main import log
-    
-    prompt = f"""
-You are parsing a client's order at a galactic restaurant.
-
-CLIENT REQUEST:
-- Name: {order_context.get('client_name', 'Unknown')}
-- Order Text: {order_context.get('order_text', '')}
-- Intolerances: {json.dumps(order_context.get('intolerances', []))}
-
-OUR MENU:
-{json.dumps(order_context.get('menu_items', []), indent=2)}
-
-Your task:
-1. Parse the order text and identify which dish the client is requesting
-2. Check if the dish exists in our menu
-3. Verify the dish does NOT contain any ingredients the client is intolerant to
-4. Respond with ONLY valid JSON:
-{{
-  "dish_name": "exact menu dish name or null if cannot determine",
-  "can_serve": true/false,
-  "intolerance_safe": true/false,
-  "reason": "brief explanation if cannot serve"
-}}
-"""
-
-    try:
-        messages = [{"role": "user", "content": prompt}]
-        
-        # Use official datapizza-ai async method
-        response = await llm_client.a_invoke({"messages": messages})
-        
-        # Strip markdown backticks that LLM might wrap around JSON
-        raw_text = response.text.strip()
-        if raw_text.startswith("```json"):
-            raw_text = raw_text[7:]  # Remove ```json prefix
-        if raw_text.startswith("```"):
-            raw_text = raw_text[3:]  # Remove ``` prefix
-        if raw_text.endswith("```"):
-            raw_text = raw_text[:-3]  # Remove ``` suffix
-        raw_text = raw_text.strip()
-        
-        decision = json.loads(raw_text)
-        log("LLM_ORDER", f"Order parsed: {decision.get('dish_name')}")
-        return decision
-    except json.JSONDecodeError as exc:
-        log("LLM_ERROR", f"Failed to parse order decision JSON: {exc}")
-        return {"error": "Invalid JSON", "can_serve": False, "dish_name": None}
-    except Exception as exc:
-        log("LLM_ERROR", f"Order parsing failed: {exc}")
-        return {"error": str(exc), "can_serve": False, "dish_name": None}
-
-
-async def make_llm_decision(phase: str, context: dict[str, Any]) -> dict[str, Any]:
-    """
-    Use the LLM to make autonomous decisions based on current phase and context.
-    Returns a structured decision with recommended actions.
-    Uses official datapizza-ai async execution method.
-    """
-    from main import log
-    
-    system_prompt = f"""
-You are the autonomous AI Chef and General Manager of a galactic restaurant in Cosmic Cycle 790.
-
-CURRENT PHASE: {phase}
-YOUR MISSION: Maximize the restaurant's balance (saldo).
-
-THE 5 GOLDEN RULES:
-1. Ingredients expire every turn - NEVER hoard, only buy what you'll cook NOW
-2. Check client intolerances strictly - serving wrong dishes causes diplomatic incidents
-3. Master the market - snipe cheap ingredients, dump excess inventory
-4. Use the panic button - close restaurant if overwhelmed (better than bad service)
-5. Execute phase-by-phase - only perform actions allowed in current phase
-
-CONTEXT:
-{json.dumps(context, indent=2)}
-
-Based on the current phase and context, decide what actions to take.
-
-OUTPUT FORMAT: You MUST return a JSON object with EXACTLY these keys (leave lists empty if no action is needed):
-{{
-  "reasoning": "string explaining your decision",
-  "menu": [{{"name": "string", "price": 0}}],
-  "bid_ingredients": [{{"ingredient": "string", "bid": 0, "quantity": 0}}],
-  "market_buys": [{{"ingredient": "string", "quantity": 0, "price": 0}}],
-  "market_sells": [{{"ingredient": "string", "quantity": 0, "price": 0}}],
-  "messages": [{{"recipient": 0, "content": "string"}}]
-}}
-
-RESPOND ONLY WITH VALID JSON. No markdown. No extra text.
-"""
-
-    user_prompt = f"What actions should I take in the {phase} phase? Provide specific tool calls with exact arguments. Return ONLY valid JSON."
-
-    try:
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-
-        # Use official datapizza-ai async method a_invoke (not chat_completion)
-        response = await llm_client.a_invoke({"messages": messages})
-        
-        # Strip markdown backticks that LLM might wrap around JSON
-        raw_text = response.text.strip()
-        if raw_text.startswith("```json"):
-            raw_text = raw_text[7:]  # Remove ```json prefix
-        if raw_text.startswith("```"):
-            raw_text = raw_text[3:]  # Remove ``` prefix
-        if raw_text.endswith("```"):
-            raw_text = raw_text[:-3]  # Remove ``` suffix
-        raw_text = raw_text.strip()
-        
-        decision = json.loads(raw_text)
-        log("LLM", f"Decision made for {phase} phase")
-        return decision
-    except json.JSONDecodeError as exc:
-        log("LLM_ERROR", f"Failed to parse LLM response as JSON: {exc}")
-        return {"error": "Invalid JSON response", "actions": []}
-    except Exception as exc:
-        log("LLM_ERROR", f"Decision making failed: {exc}")
-        return {"error": str(exc), "actions": []}
-
-
---------------------------------------------------------------------------------
 FILE: export_project.py
 --------------------------------------------------------------------------------
 #!/usr/bin/env python3
@@ -1226,6 +844,10 @@ if __name__ == "__main__":
 --------------------------------------------------------------------------------
 FILE: main.py
 --------------------------------------------------------------------------------
+import os
+
+os.environ["DATAPIZZA_TRACE_CLIENT_IO"] = "TRUE"
+
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
@@ -1238,218 +860,139 @@ FILE: main.py
 
 import asyncio
 import json
-import os
 from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 import aiohttp
-from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
+from agents.bidding_pipeline import bidding_pipeline
+from agents.speaking_pipeline import speaking_pipeline
+from agents.waiting_pipeline import waiting_pipeline
+from core.client import get_llm_client
+from core.config import BASE_URL, TEAM_API_KEY, TEAM_ID
+from core.safety import is_safe_to_cook
+from memory.state_manager import state_manager
+from tools.kitchen_tools import prepare_dish, serve_dish, update_restaurant_is_open
+from tools.market_tools import send_message
+from tools.info_tools import get_market_entries, get_meals, get_recipes, get_restaurant, get_restaurant_menu
 
-# Mandatory: Enable Datapizza Tracing for debugging
-os.environ["DATAPIZZA_TRACE_CLIENT_IO"] = "TRUE"
-
-# Import modules
-from api import (
-    mcp_client,
-    get_restaurant_state,
-    get_menu,
-    get_recipes,
-    get_meals,
-    get_market_entries,
-    get_bid_history,
-)
-from brain import make_order_decision, make_llm_decision
-
-TEAM_ID = int(os.getenv("TEAM_ID", "0"))
-TEAM_API_KEY = os.getenv("TEAM_API_KEY", "your_team_api_key")
-BASE_URL = "https://hackapizza.datapizza.tech"
-
-if not TEAM_API_KEY or not TEAM_ID:
-    raise SystemExit("Set TEAM_API_KEY and TEAM_ID environment variables")
-
-# Global state tracking
-current_turn_id = 0
-current_phase = "unknown"
-restaurant_id = str(TEAM_ID)
-prepared_dishes = {}  # Track dishes that are ready to serve
+llm_semaphore = asyncio.Semaphore(5)
 
 
 def log(tag: str, message: str) -> None:
     print(f"[{tag}] {datetime.now()}: {message}")
 
 
-##########################################################################################
-#                              PHASE-SPECIFIC HANDLERS                                   #
-##########################################################################################
+def _available_dish_names() -> list[str]:
+    dish_names: list[str] = []
+    for recipe in state_manager.recipes:
+        maybe_name = recipe.get("name") or recipe.get("dish_name") or recipe.get("title")
+        if isinstance(maybe_name, str) and maybe_name.strip():
+            dish_names.append(maybe_name.strip())
+    return dish_names
+
+
+def _pick_exact_dish_name(raw_choice: str, available_dishes: list[str]) -> str | None:
+    normalized_choice = raw_choice.strip().lower()
+    if not normalized_choice or normalized_choice == "none":
+        return None
+    for dish_name in available_dishes:
+        if dish_name.lower() == normalized_choice:
+            return dish_name
+    return None
+
+
+async def _choose_dish_with_ai(client_event: dict[str, Any]) -> str | None:
+    available_dishes = _available_dish_names()
+    if not available_dishes:
+        return None
+
+    llm_client = get_llm_client()
+    order_text = client_event.get("orderText", "")
+    client_name = client_event.get("clientName", "unknown")
+
+    prompt = (
+        "You are selecting a dish name for a client order in a restaurant simulation. "
+        f"Client: {client_name}. Order text: {order_text}. "
+        f"Allowed dish names: {available_dishes}. "
+        "Return exactly one dish name from the allowed list, or NONE if no safe match exists. "
+        "Output must be plain text only, no punctuation, no explanation."
+    )
+
+    async with llm_semaphore:
+        response = await llm_client.a_invoke(prompt)
+    return _pick_exact_dish_name(response.text, available_dishes)
+
+
+async def init_static_data() -> None:
+    state_manager.recipes = await get_recipes()
+    log("INIT", f"Static recipes cached: {len(state_manager.recipes)}")
+
+
+async def gather_all_state() -> dict[str, Any]:
+    restaurant, menu, market, meals = await asyncio.gather(
+        get_restaurant(),
+        get_restaurant_menu(),
+        get_market_entries(),
+        get_meals(state_manager.turn_id or None),
+    )
+    lite_recipes = [
+        {
+            "name": recipe.get("name") or recipe.get("dish_name"),
+            "ingredients": recipe.get("ingredients") or recipe.get("required_ingredients"),
+        }
+        for recipe in state_manager.recipes
+    ]
+    return {
+        "turn_id": state_manager.turn_id,
+        "phase": state_manager.phase,
+        "restaurant": restaurant,
+        "menu": menu,
+        "recipes": lite_recipes,
+        "market_entries": market,
+        "meals": meals,
+    }
 
 
 async def handle_speaking_phase() -> None:
-    """
-    SPEAKING PHASE:
-    - Analyze the initial state
-    - Chat with other teams via send_message to form alliances
-    - Set initial menu based on what we hope to cook
-    """
-    log("PHASE", "=== SPEAKING PHASE STARTED ===")
-
-    try:
-        # Gather context
-        restaurant_state = await get_restaurant_state()
-        recipes = await get_recipes()
-
-        context = {
-            "restaurant": restaurant_state,
-            "recipes": recipes,
-            "balance": restaurant_state.get("balance", 1000),
-            "inventory": restaurant_state.get("inventory", {}),
-        }
-
-        # Get LLM decision
-        decision = await make_llm_decision("speaking", context)
-
-        # Set initial menu
-        if "menu" in decision:
-            await mcp_client.save_menu(decision["menu"])
-
-        # Send alliance messages if recommended
-        if "messages" in decision:
-            for msg in decision["messages"]:
-                await mcp_client.send_message(msg["recipient"], msg["content"])
-
-    except Exception as exc:
-        log("PHASE_ERROR", f"Speaking phase failed: {exc}")
+    log("PHASE", "SPEAKING PHASE STARTED")
+    context = await gather_all_state()
+    result = await speaking_pipeline.a_run(
+        f"We are in speaking phase. Live state: {context}. Publish an initial menu and optionally send alliance messages."
+    )
+    log("PIPELINE", str(result))
 
 
 async def handle_closed_bid_phase() -> None:
-    """
-    CLOSED_BID PHASE:
-    - Calculate exact ingredients needed
-    - Execute blind auction bid with most efficient prices
-    - Remember: we might not win everything
-    """
-    log("PHASE", "=== CLOSED BID PHASE STARTED ===")
-
-    try:
-        # Gather context
-        restaurant_state = await get_restaurant_state()
-        recipes = await get_recipes()
-        current_menu = await get_menu()
-
-        context = {
-            "restaurant": restaurant_state,
-            "recipes": recipes,
-            "menu": current_menu,
-            "balance": restaurant_state.get("balance", 1000),
-            "inventory": restaurant_state.get("inventory", {}),
-        }
-
-        # Get LLM decision
-        decision = await make_llm_decision("closed_bid", context)
-
-        # Execute closed bid
-        if "bid_ingredients" in decision:
-            await mcp_client.closed_bid(decision["bid_ingredients"])
-
-    except Exception as exc:
-        log("PHASE_ERROR", f"Closed bid phase failed: {exc}")
+    log("PHASE", "CLOSED_BID PHASE STARTED")
+    context = await gather_all_state()
+    result = await bidding_pipeline.a_run(
+        f"We are in closed_bid phase. Live state: {context}. Submit exactly one optimized closed_bid and no waiting-only actions."
+    )
+    log("PIPELINE", str(result))
 
 
 async def handle_waiting_phase() -> None:
-    """
-    WAITING PHASE:
-    - Review what we won in the bid
-    - Re-organize kitchen and adapt menu to what we can actually cook
-    - Buy missing ingredients from public market
-    """
-    log("PHASE", "=== WAITING PHASE STARTED ===")
-
-    try:
-        # Gather context
-        restaurant_state = await get_restaurant_state()
-        recipes = await get_recipes()
-        market_entries = await get_market_entries()
-        bid_history = await get_bid_history(current_turn_id)
-
-        context = {
-            "restaurant": restaurant_state,
-            "recipes": recipes,
-            "market": market_entries,
-            "bid_history": bid_history,
-            "balance": restaurant_state.get("balance", 1000),
-            "inventory": restaurant_state.get("inventory", {}),
-        }
-
-        # Get LLM decision
-        decision = await make_llm_decision("waiting", context)
-
-        # Update menu based on actual inventory
-        if "menu" in decision:
-            await mcp_client.save_menu(decision["menu"])
-
-        # Buy missing ingredients from market
-        if "market_buys" in decision:
-            for buy in decision["market_buys"]:
-                await mcp_client.create_market_entry(
-                    "BUY", buy["ingredient"], buy["quantity"], buy["price"]
-                )
-
-        # Sell excess ingredients
-        if "market_sells" in decision:
-            for sell in decision["market_sells"]:
-                await mcp_client.create_market_entry(
-                    "SELL", sell["ingredient"], sell["quantity"], sell["price"]
-                )
-
-        # Open the restaurant for serving
-        await mcp_client.update_restaurant_is_open(True)
-
-    except Exception as exc:
-        log("PHASE_ERROR", f"Waiting phase failed: {exc}")
+    log("PHASE", "WAITING PHASE STARTED")
+    context = await gather_all_state()
+    result = await waiting_pipeline.a_run(
+        f"We are in waiting phase. Live state: {context}. Update the menu to feasible dishes and buy/sell missing or excess ingredients."
+    )
+    log("PIPELINE", str(result))
 
 
 async def handle_serving_phase() -> None:
-    """
-    SERVING PHASE:
-    - Doors are open
-    - Receive client_spawned events
-    - Match requests to menu, verify intolerances
-    - Call prepare_dish, wait for preparation_complete
-    - Call serve_dish
-    """
-    log("PHASE", "=== SERVING PHASE STARTED ===")
-    # Serving is handled reactively via client_spawned and preparation_complete events
-    # Just ensure we're open
-    try:
-        await mcp_client.update_restaurant_is_open(True)
-    except Exception as exc:
-        log("PHASE_ERROR", f"Serving phase setup failed: {exc}")
+    log("PHASE", "SERVING PHASE STARTED")
 
 
 async def handle_stopped_phase() -> None:
-    """
-    STOPPED PHASE:
-    - Turn ended
-    - Clear memory of expired ingredients
-    - Prepare for next cycle
-    """
-    log("PHASE", "=== TURN ENDED ===")
-
-    try:
-        # Close restaurant
-        await mcp_client.update_restaurant_is_open(False)
-
-        # Clear prepared dishes tracking
-        prepared_dishes.clear()
-
-        # Log final state
-        restaurant_state = await get_restaurant_state()
-        log("STATE", f"Final balance: {restaurant_state.get('balance', 'unknown')}")
-
-    except Exception as exc:
-        log("PHASE_ERROR", f"Stopped phase cleanup failed: {exc}")
+    log("PHASE", "STOPPED PHASE STARTED")
+    state_manager.reset_turn_state()
+    bidding_pipeline.reset_memory()
+    speaking_pipeline.reset_memory()
+    waiting_pipeline.reset_memory()
+    context = await gather_all_state()
+    log("STATE", f"Turn closed. Balance: {context['restaurant'].get('balance', 'unknown')}")
 
 
 ##########################################################################################
@@ -1458,15 +1001,13 @@ async def handle_stopped_phase() -> None:
 
 
 async def game_started(data: dict[str, Any]) -> None:
-    global current_turn_id
-    current_turn_id = data.get("turn_id", 0)
-    log("EVENT", f"=== GAME STARTED === Turn ID: {current_turn_id}")
+    state_manager.turn_id = data.get("turn_id", 0)
+    log("EVENT", f"GAME STARTED - Turn ID: {state_manager.turn_id}")
 
 
 async def game_phase_changed(data: dict[str, Any]) -> None:
-    global current_phase
-    current_phase = data.get("phase", "unknown")
-    log("EVENT", f"Phase changed to: {current_phase}")
+    state_manager.phase = data.get("phase", "unknown")
+    log("EVENT", f"Phase changed to: {state_manager.phase}")
 
     handlers: dict[str, Callable[[], Awaitable[None]]] = {
         "speaking": handle_speaking_phase,
@@ -1476,116 +1017,67 @@ async def game_phase_changed(data: dict[str, Any]) -> None:
         "stopped": handle_stopped_phase,
     }
 
-    handler = handlers.get(current_phase)
+    handler = handlers.get(state_manager.phase)
     if handler:
         await handler()
     else:
-        log("EVENT", f"Unknown phase: {current_phase}")
+        log("EVENT", f"Unknown phase: {state_manager.phase}")
 
 
 async def client_spawned(data: dict[str, Any]) -> None:
-    """
-    Client arrives at restaurant during serving phase.
-    Use LLM to intelligently parse the order and verify intolerances.
-    DO NOT use naive string replace - let the LLM understand complex orders.
-    """
-    client_id = data.get("clientId", "unknown")
-    client_name = data.get("clientName", "unknown")
-    order_text = data.get("orderText", "")
-    intolerances = data.get("intolerances", [])
+    client_id = str(data.get("clientId", "unknown"))
+    state_manager.active_clients[client_id] = data
+    client_intolerances = data.get("intolerances", [])
 
-    log("EVENT", f"Client spawned: {client_name} (ID: {client_id})")
-    log("ORDER", f"Order: {order_text}")
-    log("INTOLERANCE", f"Intolerances: {intolerances}")
+    ai_dish_choice = await _choose_dish_with_ai(data)
+    
+    if not ai_dish_choice or not is_safe_to_cook(client_intolerances, ai_dish_choice, state_manager.recipes):
+        log("SAFEGUARD", f"Cannot serve client {client_id} safely. HITTING PANIC BUTTON.")
+        await update_restaurant_is_open(False)
+        return
 
-    try:
-        # Get current menu for LLM to reference
-        current_menu = await get_menu()
-        menu_items = current_menu.get("items", [])
-        
-        # Prepare context for LLM
-        order_context = {
-            "client_name": client_name,
-            "order_text": order_text,
-            "intolerances": intolerances,
-            "menu_items": menu_items,
-        }
-        
-        # Use LLM to intelligently parse the order and match to menu
-        order_decision = await make_order_decision(order_context)
-        
-        if order_decision.get("error") or not order_decision.get("dish_name"):
-            log("ORDER_ERROR", f"LLM failed to parse order: {order_decision.get('error', 'Unknown')}")
-            return
-        
-        dish_name = order_decision.get("dish_name")
-        intolerance_safe = order_decision.get("intolerance_safe", False)
-        can_serve = order_decision.get("can_serve", False)
-        
-        if not intolerance_safe:
-            log(
-                "CRITICAL",
-                f"INTOLERANCE VIOLATION! Client {client_name} cannot eat this dish. CANNOT SERVE!",
-            )
-            return
-        
-        if not can_serve:
-            log("WARNING", f"Cannot serve {dish_name} to {client_name}: {order_decision.get('reason', 'Unknown')}")
-            return
-        
-        # Safe to prepare
-        log("COOK", f"Preparing {dish_name} for {client_name}")
-        await mcp_client.prepare_dish(dish_name)
-
-    except Exception as exc:
-        log("CLIENT_ERROR", f"Failed to handle client {client_id}: {exc}")
+    result = await prepare_dish(ai_dish_choice)
+    if result.get("ok"):
+        log("CHEF", f"Preparing safe dish '{ai_dish_choice}' for client {client_id}")
+    else:
+        log("CHEF_ERROR", f"prepare_dish failed for '{ai_dish_choice}': {result.get('error')}")
 
 
 async def preparation_complete(data: dict[str, Any]) -> None:
-    """
-    Dish is ready. Now we can serve it to the client.
-    """
-    dish_name = data.get("dish", "unknown")
-    client_id = data.get("clientId", "unknown")
-
-    log("EVENT", f"Dish ready: {dish_name} for client {client_id}")
-
-    try:
-        # Serve the dish
-        await mcp_client.serve_dish(dish_name, client_id)
-        log("SERVE", f"Served {dish_name} to client {client_id}")
-
-    except Exception as exc:
-        log("SERVE_ERROR", f"Failed to serve dish: {exc}")
+    dish_name = data.get("dish", "")
+    client_id = str(data.get("clientId", "unknown"))
+    if dish_name:
+        state_manager.prepared_dishes[client_id] = dish_name
+        client_event = state_manager.active_clients.get(client_id, {})
+        client_intolerances = client_event.get("intolerances", [])
+        if is_safe_to_cook(client_intolerances, dish_name, state_manager.recipes):
+            result = await serve_dish(dish_name, client_id)
+            if result.get("ok"):
+                log("SERVE", f"Served safe dish '{dish_name}' to client {client_id}")
+            else:
+                log("SERVE_ERROR", f"serve_dish failed for '{dish_name}': {result.get('error')}")
+        else:
+            log("SAFEGUARD", f"Blocked unsafe serve for dish '{dish_name}' and client {client_id}")
 
 
 async def message(data: dict[str, Any]) -> None:
-    """Handle broadcast market messages"""
-    sender = data.get("sender", "unknown")
-    text = data.get("payload", "")
-    log("MESSAGE", f"Broadcast from {sender}: {text}")
-    # Could implement alliance logic here
+    log("MESSAGE", f"Broadcast: {data}")
 
 
 async def new_message(data: dict[str, Any]) -> None:
-    """Handle direct team-to-team messages"""
-    sender_name = data.get("senderName", "unknown")
-    text = data.get("text", "")
-    log("DIRECT_MSG", f"From {sender_name}: {text}")
+    log("DIRECT_MSG", f"Direct message received: {data}")
+    sender = data.get("sender", 0)
+    if sender:
+        await send_message(int(sender), "Message received.")
 
 
 async def heartbeat(data: dict[str, Any]) -> None:
-    """Handle heartbeat events silently"""
-    pass  # Just keep connection alive
+    pass
 
 
 async def game_reset(data: dict[str, Any]) -> None:
-    """Handle game reset"""
-    global current_turn_id, current_phase
-    current_turn_id = 0
-    current_phase = "unknown"
-    prepared_dishes.clear()
-    log("EVENT", "=== GAME RESET ===")
+    state_manager.on_game_reset()
+    log("EVENT", "GAME RESET")
 
 
 EVENT_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[None]]] = {
@@ -1605,7 +1097,6 @@ EVENT_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[None]]] = {
 
 
 async def dispatch_event(event_type: str, event_data: dict[str, Any]) -> None:
-    """Central event dispatcher used by all handlers"""
     handler = EVENT_HANDLERS.get(event_type)
     if not handler:
         return
@@ -1616,7 +1107,6 @@ async def dispatch_event(event_type: str, event_data: dict[str, Any]) -> None:
 
 
 async def handle_line(raw_line: bytes) -> None:
-    """Parse SSE lines and translate them into internal events"""
     if not raw_line:
         return
 
@@ -1624,7 +1114,6 @@ async def handle_line(raw_line: bytes) -> None:
     if not line:
         return
 
-    # Standard SSE data format: data: ...
     if line.startswith("data:"):
         payload = line[5:].strip()
         if payload == "connected":
@@ -1647,7 +1136,6 @@ async def handle_line(raw_line: bytes) -> None:
 
 
 async def listen_once(session: aiohttp.ClientSession) -> None:
-    """Own the SSE HTTP connection lifecycle"""
     url = f"{BASE_URL}/events/{TEAM_ID}"
     headers = {"Accept": "text/event-stream", "x-api-key": TEAM_API_KEY}
 
@@ -1659,7 +1147,6 @@ async def listen_once(session: aiohttp.ClientSession) -> None:
 
 
 async def listen_once_and_exit_on_drop() -> None:
-    """Control script exit behavior when the SSE connection drops"""
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=None)
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -1668,11 +1155,11 @@ async def listen_once_and_exit_on_drop() -> None:
 
 
 async def main() -> None:
-    """Main entry point"""
-    log("INIT", f"=== AI CHEF STARTING ===")
+    log("INIT", "AI MANAGER + CHEF STARTING")
     log("INIT", f"Team ID: {TEAM_ID}")
     log("INIT", f"Base URL: {BASE_URL}")
-    log("INIT", f"LLM: Regolo.ai gpt-oss-120b")
+    log("INIT", "LLM: Regolo.ai gpt-oss-120b via datapizza OpenAILikeClient")
+    await init_static_data()
     await listen_once_and_exit_on_drop()
 
 
@@ -1688,12 +1175,645 @@ if __name__ == "__main__":
 --------------------------------------------------------------------------------
 FILE: requirements.txt
 --------------------------------------------------------------------------------
-aiohttp>=3.8.0
-datapizza-ai>=0.1.0
-datapizza-ai-clients-openai-like>=0.1.0
-python-dotenv>=1.0.0
+aiohttp
+datapizza-ai
+datapizza-ai-clients-openai-like
+python-dotenv
+
+
+[BINARY/SKIPPED] test.ipynb
+--------------------------------------------------------------------------------
+FILE: tools/__init__.py
+--------------------------------------------------------------------------------
+from .info_tools import (
+    get_market_entries,
+    get_meals,
+    get_recipes,
+    get_restaurant,
+    get_restaurant_menu,
+)
+from .kitchen_tools import prepare_dish, serve_dish, update_restaurant_is_open
+from .market_tools import (
+    closed_bid,
+    create_market_entry,
+    delete_market_entry,
+    execute_transaction,
+    save_menu,
+    send_message,
+)
+
+__all__ = [
+    "closed_bid",
+    "create_market_entry",
+    "delete_market_entry",
+    "execute_transaction",
+    "save_menu",
+    "send_message",
+    "prepare_dish",
+    "serve_dish",
+    "update_restaurant_is_open",
+    "get_restaurant",
+    "get_restaurant_menu",
+    "get_recipes",
+    "get_market_entries",
+    "get_meals",
+]
+
+
+--------------------------------------------------------------------------------
+FILE: tools/info_tools.py
+--------------------------------------------------------------------------------
+from typing import Any
+
+import asyncio
+
+import aiohttp
+
+from core.config import BASE_URL, TEAM_API_KEY, TEAM_ID
+
+
+async def _get(path: str, params: dict[str, Any] | None = None) -> Any:
+    headers = {"x-api-key": TEAM_API_KEY}
+    timeout = aiohttp.ClientTimeout(total=30)
+    max_attempts = 5
+    backoff = 0.5
+
+    for attempt in range(max_attempts):
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(f"{BASE_URL}{path}", headers=headers, params=params) as response:
+                    if response.status == 429 and attempt < max_attempts - 1:
+                        retry_after = response.headers.get("Retry-After")
+                        wait_seconds = float(retry_after) if retry_after else backoff
+                        await asyncio.sleep(wait_seconds)
+                        backoff = min(backoff * 2, 8)
+                        continue
+                        
+                    response.raise_for_status()
+                    return await response.json()
+                    
+        except aiohttp.ClientResponseError as exc:
+            if exc.status in {408, 429, 500, 502, 503, 504} and attempt < max_attempts - 1:
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 8)
+                continue
+            raise
+        except asyncio.TimeoutError:
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 8)
+                continue
+            raise
+
+
+async def get_restaurant(restaurant_id: int | str = TEAM_ID) -> dict[str, Any]:
+    """
+    GET /restaurant/:id
+    Returns the live restaurant state including balance and inventory.
+    """
+    return await _get(f"/restaurant/{restaurant_id}")
+
+
+async def get_restaurant_menu(restaurant_id: int | str = TEAM_ID) -> dict[str, Any]:
+    """
+    GET /restaurant/:id/menu
+    Returns menu items currently published by the restaurant.
+    """
+    return await _get(f"/restaurant/{restaurant_id}/menu")
+
+
+async def get_recipes() -> list[dict[str, Any]]:
+    """
+    GET /recipes
+    Returns all recipes and their required ingredients.
+    """
+    return await _get("/recipes")
+
+
+async def get_market_entries() -> list[dict[str, Any]]:
+    """
+    GET /market/entries
+    Returns active public market orders.
+    """
+    return await _get("/market/entries")
+
+
+async def get_meals(turn_id: int | None = None) -> list[dict[str, Any]]:
+    """
+    GET /meals
+    Returns meals for current team; when provided, filters by turn.
+    """
+    params: dict[str, Any] = {"restaurant_id": TEAM_ID}
+    if turn_id is not None:
+        params["turn_id"] = turn_id
+    return await _get("/meals", params=params)
+
+
+--------------------------------------------------------------------------------
+FILE: tools/kitchen_tools.py
+--------------------------------------------------------------------------------
+from typing import Any
+
+from .mcp_wrapper import call_mcp_tool
+
+
+async def prepare_dish(dish_name: str) -> dict[str, Any]:
+    """
+    Format: {"dish_name": string}
+    Avvia la preparazione di un piatto. Allowed only in serving phase.
+    """
+    return await call_mcp_tool("prepare_dish", {"dish_name": dish_name})
+
+
+async def serve_dish(dish_name: str, client_id: str) -> dict[str, Any]:
+    """
+    Format: {"dish_name": string, "client_id": string}
+    Serve a prepared dish to the specified client.
+    """
+    return await call_mcp_tool("serve_dish", {"dish_name": dish_name, "client_id": client_id})
+
+
+async def update_restaurant_is_open(is_open: bool) -> dict[str, Any]:
+    """
+    Format: {"is_open": boolean}
+    Open or close restaurant service as a safety control.
+    """
+    return await call_mcp_tool("update_restaurant_is_open", {"is_open": is_open})
+
+
+--------------------------------------------------------------------------------
+FILE: tools/market_tools.py
+--------------------------------------------------------------------------------
+from typing import Any
+
+from .mcp_wrapper import call_mcp_tool
+
+
+async def create_market_entry(side: str, ingredient_name: str, quantity: int, price: float) -> dict[str, Any]:
+    """
+    Format: {"side": "BUY"|"SELL", "ingredient_name": string, "quantity": int, "price": float}
+    Create a public market entry to buy or sell ingredients.
+    """
+    return await call_mcp_tool(
+        "create_market_entry",
+        {
+            "side": side.upper(),
+            "ingredient_name": ingredient_name,
+            "quantity": quantity,
+            "price": price,
+        },
+    )
+
+
+async def execute_transaction(market_entry_id: int) -> dict[str, Any]:
+    """
+    Format: {"market_entry_id": int}
+    Execute a transaction against an existing market entry.
+    """
+    return await call_mcp_tool("execute_transaction", {"market_entry_id": market_entry_id})
+
+
+async def delete_market_entry(market_entry_id: int) -> dict[str, Any]:
+    """
+    Format: {"market_entry_id": int}
+    Delete one of our own market entries.
+    """
+    return await call_mcp_tool("delete_market_entry", {"market_entry_id": market_entry_id})
+
+
+async def closed_bid(bids: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Format: {"bids": [{"ingredient": string, "bid": number, "quantity": number}, ...]}
+    Submit the turn's blind auction bid payload.
+    """
+    return await call_mcp_tool("closed_bid", {"bids": bids})
+
+
+async def save_menu(items: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Format: {"items": [{"name": string, "price": number}, ...]}
+    Save or replace the current restaurant menu.
+    """
+    return await call_mcp_tool("save_menu", {"items": items})
+
+
+async def send_message(recipient_id: int, text: str) -> dict[str, Any]:
+    """
+    Format: {"recipient_id": number, "text": string}
+    Send a direct message to another team.
+    """
+    return await call_mcp_tool("send_message", {"recipient_id": recipient_id, "text": text})
+
+
+--------------------------------------------------------------------------------
+FILE: tools/mcp_wrapper.py
+--------------------------------------------------------------------------------
+import asyncio
+import uuid
+from typing import Any
+
+import aiohttp
+
+from core.config import BASE_URL, TEAM_API_KEY
+
+
+async def call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Execute an MCP action via JSON-RPC `tools/call` with basic 429 handling."""
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": arguments},
+        "id": str(uuid.uuid4()),
+    }
+    headers = {"x-api-key": TEAM_API_KEY, "Content-Type": "application/json"}
+
+    max_attempts = 5
+    backoff = 0.5
+    timeout = aiohttp.ClientTimeout(total=30)
+
+    for attempt in range(max_attempts):
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(f"{BASE_URL}/mcp", json=payload, headers=headers) as response:
+                    if response.status == 429 and attempt < max_attempts - 1:
+                        retry_after = response.headers.get("Retry-After")
+                        wait_seconds = float(retry_after) if retry_after else backoff
+                        await asyncio.sleep(wait_seconds)
+                        backoff = min(backoff * 2, 8)
+                        continue
+
+                    response.raise_for_status()
+                    data = await response.json()
+
+                    if "error" in data:
+                        return {
+                            "ok": False,
+                            "error": data["error"],
+                            "tool": tool_name,
+                            "retriable": False,
+                        }
+
+                    result = data.get("result", {})
+                    if result.get("isError"):
+                        error_msg = "Unknown MCP Error"
+                        content = result.get("content", [])
+                        if isinstance(content, list) and len(content) > 0:
+                            first_item = content[0]
+                            if isinstance(first_item, dict):
+                                error_msg = first_item.get("text", "Unknown MCP Error")
+                        elif isinstance(content, dict):
+                            error_msg = content.get("text", "Unknown MCP Error")
+
+                        return {
+                            "ok": False,
+                            "error": error_msg,
+                            "tool": tool_name,
+                            "retriable": False,
+                        }
+
+                    return {
+                        "ok": True,
+                        "tool": tool_name,
+                        "result": result,
+                    }
+        except aiohttp.ClientResponseError as exc:
+            return {
+                "ok": False,
+                "tool": tool_name,
+                "error": {
+                    "status": exc.status,
+                    "message": exc.message,
+                },
+                "retriable": exc.status in {408, 429, 500, 502, 503, 504},
+            }
+        except asyncio.TimeoutError:
+            return {
+                "ok": False,
+                "tool": tool_name,
+                "error": {"message": "Tool call timed out"},
+                "retriable": True,
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "tool": tool_name,
+                "error": {"message": str(exc)},
+                "retriable": True,
+            }
+
+    return {
+        "ok": False,
+        "tool": tool_name,
+        "error": {"message": "Rate limit exceeded after retries"},
+        "retriable": True,
+    }
+
+
+--------------------------------------------------------------------------------
+FILE: core/__init__.py
+--------------------------------------------------------------------------------
+from .client import get_llm_client
+from .config import BASE_URL, TEAM_API_KEY, TEAM_ID
+from .safety import is_safe_to_cook
+
+__all__ = ["get_llm_client", "BASE_URL", "TEAM_API_KEY", "TEAM_ID", "is_safe_to_cook"]
+
+
+--------------------------------------------------------------------------------
+FILE: core/client.py
+--------------------------------------------------------------------------------
+from datapizza.clients.openai_like import OpenAILikeClient
+
+from core.config import REGOLO_API_KEY
+
+
+def get_llm_client() -> OpenAILikeClient:
+    return OpenAILikeClient(
+        api_key=REGOLO_API_KEY,
+        model="gpt-oss-120b",
+        base_url="https://api.regolo.ai/v1",
+    )
+
+
+--------------------------------------------------------------------------------
+FILE: core/config.py
+--------------------------------------------------------------------------------
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+BASE_URL = os.getenv("BASE_URL", "https://hackapizza.datapizza.tech")
+TEAM_ID = int(os.getenv("TEAM_ID", "0"))
+TEAM_API_KEY = os.getenv("TEAM_API_KEY", "")
+REGOLO_API_KEY = os.getenv("REGOLO_API_KEY", "")
+
+if TEAM_ID <= 0:
+    raise SystemExit("Set TEAM_ID environment variable")
+
+if not TEAM_API_KEY:
+    raise SystemExit("Set TEAM_API_KEY environment variable")
+
+if not REGOLO_API_KEY:
+    raise SystemExit("Set REGOLO_API_KEY environment variable")
+
+
+--------------------------------------------------------------------------------
+FILE: core/safety.py
+--------------------------------------------------------------------------------
+from typing import Any
+
+
+def _normalize(values: list[str]) -> set[str]:
+    return {value.strip().lower() for value in values if isinstance(value, str) and value.strip()}
+
+
+def _extract_ingredient_names(recipe: dict[str, Any]) -> set[str]:
+    raw_ingredients = (
+        recipe.get("ingredients")
+        or recipe.get("required_ingredients")
+        or recipe.get("recipe_ingredients")
+        or []
+    )
+
+    ingredient_names: set[str] = set()
+    if isinstance(raw_ingredients, list):
+        for item in raw_ingredients:
+            if isinstance(item, str):
+                name = item.strip().lower()
+                if name:
+                    ingredient_names.add(name)
+                continue
+
+            if isinstance(item, dict):
+                maybe_name = (
+                    item.get("name")
+                    or item.get("ingredient")
+                    or item.get("ingredient_name")
+                    or item.get("item")
+                )
+                if isinstance(maybe_name, str) and maybe_name.strip():
+                    ingredient_names.add(maybe_name.strip().lower())
+
+    return ingredient_names
+
+
+def is_safe_to_cook(
+    client_intolerances: list[str],
+    dish_name: str,
+    recipes_cache: list[dict],
+) -> bool:
+    normalized_dish = dish_name.strip().lower()
+    if not normalized_dish:
+        return False
+
+    intolerances = _normalize(client_intolerances)
+
+    for recipe in recipes_cache:
+        recipe_name = (
+            recipe.get("name")
+            or recipe.get("dish_name")
+            or recipe.get("title")
+            or ""
+        )
+        if not isinstance(recipe_name, str):
+            continue
+        if recipe_name.strip().lower() != normalized_dish:
+            continue
+
+        required_ingredients = _extract_ingredient_names(recipe)
+        return len(required_ingredients.intersection(intolerances)) == 0
+
+    return False
+
+
+--------------------------------------------------------------------------------
+FILE: memory/__init__.py
+--------------------------------------------------------------------------------
+from .state_manager import state_manager
+
+__all__ = ["state_manager"]
+
+
+--------------------------------------------------------------------------------
+FILE: memory/state_manager.py
+--------------------------------------------------------------------------------
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class StateManager:
+    turn_id: int = 0
+    phase: str = "unknown"
+    recipes: list[dict[str, Any]] = field(default_factory=list)
+    prepared_dishes: dict[str, str] = field(default_factory=dict)
+    active_clients: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def reset_turn_state(self) -> None:
+        self.prepared_dishes.clear()
+        self.active_clients.clear()
+
+    def on_game_reset(self) -> None:
+        self.turn_id = 0
+        self.phase = "unknown"
+        self.reset_turn_state()
+
+
+state_manager = StateManager()
+
+
+--------------------------------------------------------------------------------
+FILE: agents/__init__.py
+--------------------------------------------------------------------------------
+from .bidding_pipeline import bidding_pipeline
+from .speaking_pipeline import speaking_pipeline
+from .waiting_pipeline import waiting_pipeline
+
+__all__ = ["speaking_pipeline", "bidding_pipeline", "waiting_pipeline"]
+
+
+--------------------------------------------------------------------------------
+FILE: agents/bidding_pipeline.py
+--------------------------------------------------------------------------------
+from typing import Any
+
+from datapizza.agents.agent import Agent
+
+from core.client import get_llm_client
+from tools.market_tools import closed_bid
+
+
+BIDDING_SYSTEM_PROMPT = """
+You operate only during the closed_bid phase.
+Allowed action: submit exactly one closed_bid payload.
+Do not attempt any other action or tool.
+""".strip()
+
+
+class BiddingPipeline:
+    def __init__(self) -> None:
+        llm_client = get_llm_client()
+        self.phase_agent = Agent(
+            name="bidding_phase_agent",
+            client=llm_client,
+            system_prompt=BIDDING_SYSTEM_PROMPT,
+            tools=[closed_bid],
+        )
+
+    def reset_memory(self) -> None:
+        llm_client = get_llm_client()
+        self.phase_agent = Agent(
+            name="bidding_phase_agent",
+            client=llm_client,
+            system_prompt=BIDDING_SYSTEM_PROMPT,
+            tools=[closed_bid],
+        )
+
+    async def a_run(self, task_input: str) -> Any:
+        return await self.phase_agent.a_run(
+            task_input=task_input,
+            tool_choice="required",
+        )
+
+
+bidding_pipeline = BiddingPipeline()
+
+
+--------------------------------------------------------------------------------
+FILE: agents/speaking_pipeline.py
+--------------------------------------------------------------------------------
+from typing import Any
+
+from datapizza.agents.agent import Agent
+
+from core.client import get_llm_client
+from tools.market_tools import save_menu, send_message
+
+
+SPEAKING_SYSTEM_PROMPT = """
+You operate only during the speaking phase.
+Allowed actions: send_message and save_menu.
+Do not attempt any other action or tool.
+""".strip()
+
+
+class SpeakingPipeline:
+    def __init__(self) -> None:
+        llm_client = get_llm_client()
+        self.phase_agent = Agent(
+            name="speaking_phase_agent",
+            client=llm_client,
+            system_prompt=SPEAKING_SYSTEM_PROMPT,
+            tools=[send_message, save_menu],
+        )
+
+    def reset_memory(self) -> None:
+        llm_client = get_llm_client()
+        self.phase_agent = Agent(
+            name="speaking_phase_agent",
+            client=llm_client,
+            system_prompt=SPEAKING_SYSTEM_PROMPT,
+            tools=[send_message, save_menu],
+        )
+
+    async def a_run(self, task_input: str) -> Any:
+        return await self.phase_agent.a_run(task_input=task_input)
+
+
+speaking_pipeline = SpeakingPipeline()
+
+
+--------------------------------------------------------------------------------
+FILE: agents/waiting_pipeline.py
+--------------------------------------------------------------------------------
+from typing import Any
+
+from datapizza.agents.agent import Agent
+
+from core.client import get_llm_client
+from tools.market_tools import (
+    create_market_entry,
+    delete_market_entry,
+    execute_transaction,
+    save_menu,
+)
+
+
+WAITING_SYSTEM_PROMPT = """
+You operate only during the waiting phase.
+Allowed actions: save_menu, create_market_entry, execute_transaction, delete_market_entry.
+Do not attempt any other action or tool.
+""".strip()
+
+
+class WaitingPipeline:
+    def __init__(self) -> None:
+        llm_client = get_llm_client()
+        self.phase_agent = Agent(
+            name="waiting_phase_agent",
+            client=llm_client,
+            system_prompt=WAITING_SYSTEM_PROMPT,
+            tools=[save_menu, create_market_entry, execute_transaction, delete_market_entry],
+        )
+
+    def reset_memory(self) -> None:
+        llm_client = get_llm_client()
+        self.phase_agent = Agent(
+            name="waiting_phase_agent",
+            client=llm_client,
+            system_prompt=WAITING_SYSTEM_PROMPT,
+            tools=[save_menu, create_market_entry, execute_transaction, delete_market_entry],
+        )
+
+    async def a_run(self, task_input: str) -> Any:
+        return await self.phase_agent.a_run(task_input=task_input)
+
+
+waiting_pipeline = WaitingPipeline()
 
 
 ================================================================================
-Export complete. 9 files exported.
+Export complete. 22 files exported.
 ================================================================================
