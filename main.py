@@ -11,7 +11,6 @@
 import asyncio
 import json
 import os
-import uuid
 from datetime import datetime
 from typing import Any, Awaitable, Callable
 
@@ -24,14 +23,17 @@ load_dotenv()
 # Mandatory: Enable Datapizza Tracing for debugging
 os.environ["DATAPIZZA_TRACE_CLIENT_IO"] = "TRUE"
 
-# Initialize the Regolo.ai LLM
-from datapizza.clients.openai_like import OpenAILikeClient
-
-llm_client = OpenAILikeClient(
-    api_key=os.getenv("REGOLO_API_KEY"),
-    model="gpt-oss-120b",
-    base_url="https://api.regolo.ai/v1",
+# Import modules
+from api import (
+    mcp_client,
+    get_restaurant_state,
+    get_menu,
+    get_recipes,
+    get_meals,
+    get_market_entries,
+    get_bid_history,
 )
+from brain import make_order_decision, make_llm_decision
 
 TEAM_ID = int(os.getenv("TEAM_ID", "0"))
 TEAM_API_KEY = os.getenv("TEAM_API_KEY", "your_team_api_key")
@@ -49,330 +51,6 @@ prepared_dishes = {}  # Track dishes that are ready to serve
 
 def log(tag: str, message: str) -> None:
     print(f"[{tag}] {datetime.now()}: {message}")
-
-
-##########################################################################################
-#                           MCP PROTOCOL (TOOL EXECUTION)                                #
-##########################################################################################
-
-
-class MCPClient:
-    """
-    Wrapper for executing actions via the Model Context Protocol (MCP).
-    All tool executions must go through POST /mcp with JSON-RPC format.
-    """
-
-    def __init__(self, base_url: str, api_key: str):
-        self.base_url = base_url
-        self.api_key = api_key
-
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Execute a tool via the MCP endpoint"""
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {"name": tool_name, "arguments": arguments},
-            "id": str(uuid.uuid4()),
-        }
-
-        headers = {"x-api-key": self.api_key, "Content-Type": "application/json"}
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.base_url}/mcp", json=payload, headers=headers
-                ) as resp:
-                    # Handle rate limiting
-                    if resp.status == 429:
-                        log("MCP_ERROR", f"{tool_name} rate limited (429). Backing off.")
-                        await asyncio.sleep(1)  # Back off for 1 second
-                        return {"success": False, "error": "Rate limit exceeded"}
-                    
-                    result = await resp.json()
-                    
-                    # Parse MCP response according to official spec
-                    # Success: result.isError = false
-                    # Error: result.isError = true, error in result.content.text
-                    if result.get("result", {}).get("isError", False):
-                        error_msg = result.get("result", {}).get("content", {}).get("text", "Unknown error")
-                        log("MCP_ERROR", f"{tool_name} failed: {error_msg}")
-                        return {"success": False, "error": error_msg}
-                    
-                    log("MCP", f"{tool_name} executed successfully")
-                    return {"success": True, "result": result}
-        except Exception as exc:
-            log("MCP_ERROR", f"{tool_name} exception: {exc}")
-            return {"success": False, "error": str(exc)}
-
-    # Convenience methods for each tool (OFFICIAL SPEC FORMATS)
-    async def save_menu(self, menu_items: list[dict[str, Any]]) -> dict[str, Any]:
-        """Format: [{"name": string, "price": number}, ...]"""
-        return await self.call_tool("save_menu", {"items": menu_items})
-
-    async def closed_bid(self, ingredients: list[dict[str, Any]]) -> dict[str, Any]:
-        """Format: [{"ingredient": string, "bid": number, "quantity": number}, ...]
-        CRITICAL: Only the LAST submission per turn is valid!"""
-        return await self.call_tool("closed_bid", {"bids": ingredients})
-
-    async def create_market_entry(
-        self, side: str, ingredient_name: str, quantity: int, price: float
-    ) -> dict[str, Any]:
-        """Format: {"side": "BUY" | "SELL", "ingredient_name": string, "quantity": int, "price": float}
-        Side effect: Triggers broadcast 'message' SSE"""
-        return await self.call_tool(
-            "create_market_entry",
-            {
-                "side": side.upper(),  # Must be "BUY" or "SELL"
-                "ingredient_name": ingredient_name,
-                "quantity": quantity,
-                "price": price,
-            },
-        )
-
-    async def execute_transaction(self, market_entry_id: int) -> dict[str, Any]:
-        """Execute a market transaction"""
-        return await self.call_tool("execute_transaction", {"market_entry_id": market_entry_id})
-
-    async def delete_market_entry(self, market_entry_id: int) -> dict[str, Any]:
-        """Delete a market entry"""
-        return await self.call_tool("delete_market_entry", {"market_entry_id": market_entry_id})
-
-    async def prepare_dish(self, dish_name: str) -> dict[str, Any]:
-        """Format: {"dish_name": string}"""
-        return await self.call_tool("prepare_dish", {"dish_name": dish_name})
-
-    async def serve_dish(self, dish_name: str, client_id: str) -> dict[str, Any]:
-        """Format: {"dish_name": string, "client_id": string}"""
-        return await self.call_tool("serve_dish", {"dish_name": dish_name, "client_id": client_id})
-
-    async def update_restaurant_is_open(self, is_open: bool) -> dict[str, Any]:
-        """Format: {"is_open": boolean}"""
-        return await self.call_tool("update_restaurant_is_open", {"is_open": is_open})
-
-    async def send_message(self, recipient_id: int, text: str) -> dict[str, Any]:
-        """Format: {"recipient_id": number, "text": string}
-        Side effect: Triggers 'new_message' SSE to recipient"""
-        return await self.call_tool("send_message", {"recipient_id": recipient_id, "text": text})
-
-
-mcp_client = MCPClient(BASE_URL, TEAM_API_KEY)
-
-
-##########################################################################################
-#                          STATE GATHERING (READ-ONLY ENDPOINTS)                         #
-##########################################################################################
-
-
-async def get_restaurant_state() -> dict[str, Any]:
-    """Fetch current restaurant state including inventory and balance"""
-    headers = {"x-api-key": TEAM_API_KEY}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"{BASE_URL}/restaurant/{restaurant_id}", headers=headers
-            ) as resp:
-                return await resp.json()
-    except Exception as exc:
-        log("API_ERROR", f"get_restaurant_state failed: {exc}")
-        return {}
-
-
-async def get_menu() -> dict[str, Any]:
-    """Fetch current menu"""
-    headers = {"x-api-key": TEAM_API_KEY}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"{BASE_URL}/restaurant/{restaurant_id}/menu", headers=headers
-            ) as resp:
-                return await resp.json()
-    except Exception as exc:
-        log("API_ERROR", f"get_menu failed: {exc}")
-        return {}
-
-
-async def get_recipes() -> list[dict[str, Any]]:
-    """Fetch available recipes, required ingredients, and cooking times"""
-    headers = {"x-api-key": TEAM_API_KEY}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{BASE_URL}/recipes", headers=headers) as resp:
-                return await resp.json()
-    except Exception as exc:
-        log("API_ERROR", f"get_recipes failed: {exc}")
-        return []
-
-
-async def get_meals() -> list[dict[str, Any]]:
-    """Fetch client orders to be served"""
-    headers = {"x-api-key": TEAM_API_KEY}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"{BASE_URL}/meals?turn_id={current_turn_id}&restaurant_id={restaurant_id}",
-                headers=headers,
-            ) as resp:
-                return await resp.json()
-    except Exception as exc:
-        log("API_ERROR", f"get_meals failed: {exc}")
-        return []
-
-
-async def get_market_entries() -> list[dict[str, Any]]:
-    """Fetch active market trades"""
-    headers = {"x-api-key": TEAM_API_KEY}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{BASE_URL}/market/entries", headers=headers) as resp:
-                return await resp.json()
-    except Exception as exc:
-        log("API_ERROR", f"get_market_entries failed: {exc}")
-        return []
-
-
-async def get_bid_history() -> list[dict[str, Any]]:
-    """Fetch past closed bids"""
-    headers = {"x-api-key": TEAM_API_KEY}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"{BASE_URL}/bid_history?turn_id={current_turn_id}", headers=headers
-            ) as resp:
-                return await resp.json()
-    except Exception as exc:
-        log("API_ERROR", f"get_bid_history failed: {exc}")
-        return []
-
-
-##########################################################################################
-#                         AI DECISION-MAKING ENGINE                                      #
-##########################################################################################
-
-
-async def make_order_decision(order_context: dict[str, Any]) -> dict[str, Any]:
-    """
-    Use LLM to intelligently parse a client's order.
-    Match order text to menu, verify intolerances, determine if we can serve.
-    DO NOT use naive string replace - let the LLM understand complex orders.
-    """
-    prompt = f"""
-You are parsing a client's order at a galactic restaurant.
-
-CLIENT REQUEST:
-- Name: {order_context.get('client_name', 'Unknown')}
-- Order Text: {order_context.get('order_text', '')}
-- Intolerances: {json.dumps(order_context.get('intolerances', []))}
-
-OUR MENU:
-{json.dumps(order_context.get('menu_items', []), indent=2)}
-
-Your task:
-1. Parse the order text and identify which dish the client is requesting
-2. Check if the dish exists in our menu
-3. Verify the dish does NOT contain any ingredients the client is intolerant to
-4. Respond with ONLY valid JSON:
-{{
-  "dish_name": "exact menu dish name or null if cannot determine",
-  "can_serve": true/false,
-  "intolerance_safe": true/false,
-  "reason": "brief explanation if cannot serve"
-}}
-"""
-
-    try:
-        messages = [{"role": "user", "content": prompt}]
-        
-        # Use official datapizza-ai async method
-        response = await llm_client.a_invoke({"messages": messages})
-        
-        # Strip markdown backticks that LLM might wrap around JSON
-        raw_text = response.text.strip()
-        if raw_text.startswith("```json"):
-            raw_text = raw_text[7:]  # Remove ```json prefix
-        if raw_text.startswith("```"):
-            raw_text = raw_text[3:]  # Remove ``` prefix
-        if raw_text.endswith("```"):
-            raw_text = raw_text[:-3]  # Remove ``` suffix
-        raw_text = raw_text.strip()
-        
-        decision = json.loads(raw_text)
-        log("LLM_ORDER", f"Order parsed: {decision.get('dish_name')}")
-        return decision
-    except json.JSONDecodeError as exc:
-        log("LLM_ERROR", f"Failed to parse order decision JSON: {exc}")
-        return {"error": "Invalid JSON", "can_serve": False, "dish_name": None}
-    except Exception as exc:
-        log("LLM_ERROR", f"Order parsing failed: {exc}")
-        return {"error": str(exc), "can_serve": False, "dish_name": None}
-
-
-async def make_llm_decision(phase: str, context: dict[str, Any]) -> dict[str, Any]:
-    """
-    Use the LLM to make autonomous decisions based on current phase and context.
-    Returns a structured decision with recommended actions.
-    Uses official datapizza-ai async execution method.
-    """
-    system_prompt = f"""
-You are the autonomous AI Chef and General Manager of a galactic restaurant in Cosmic Cycle 790.
-
-CURRENT PHASE: {phase}
-YOUR MISSION: Maximize the restaurant's balance (saldo).
-
-THE 5 GOLDEN RULES:
-1. Ingredients expire every turn - NEVER hoard, only buy what you'll cook NOW
-2. Check client intolerances strictly - serving wrong dishes causes diplomatic incidents
-3. Master the market - snipe cheap ingredients, dump excess inventory
-4. Use the panic button - close restaurant if overwhelmed (better than bad service)
-5. Execute phase-by-phase - only perform actions allowed in current phase
-
-CONTEXT:
-{json.dumps(context, indent=2)}
-
-Based on the current phase and context, decide what actions to take.
-
-OUTPUT FORMAT: You MUST return a JSON object with EXACTLY these keys (leave lists empty if no action is needed):
-{{
-  "reasoning": "string explaining your decision",
-  "menu": [{{"name": "string", "price": 0}}],
-  "bid_ingredients": [{{"ingredient": "string", "bid": 0, "quantity": 0}}],
-  "market_buys": [{{"ingredient": "string", "quantity": 0, "price": 0}}],
-  "market_sells": [{{"ingredient": "string", "quantity": 0, "price": 0}}],
-  "messages": [{{"recipient": 0, "content": "string"}}]
-}}
-
-RESPOND ONLY WITH VALID JSON. No markdown. No extra text.
-"""
-
-    user_prompt = f"What actions should I take in the {phase} phase? Provide specific tool calls with exact arguments. Return ONLY valid JSON."
-
-    try:
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-
-        # Use official datapizza-ai async method a_invoke (not chat_completion)
-        response = await llm_client.a_invoke({"messages": messages})
-        
-        # Strip markdown backticks that LLM might wrap around JSON
-        raw_text = response.text.strip()
-        if raw_text.startswith("```json"):
-            raw_text = raw_text[7:]  # Remove ```json prefix
-        if raw_text.startswith("```"):
-            raw_text = raw_text[3:]  # Remove ``` prefix
-        if raw_text.endswith("```"):
-            raw_text = raw_text[:-3]  # Remove ``` suffix
-        raw_text = raw_text.strip()
-        
-        decision = json.loads(raw_text)
-        log("LLM", f"Decision made for {phase} phase")
-        return decision
-    except json.JSONDecodeError as exc:
-        log("LLM_ERROR", f"Failed to parse LLM response as JSON: {exc}")
-        return {"error": "Invalid JSON response", "actions": []}
-    except Exception as exc:
-        log("LLM_ERROR", f"Decision making failed: {exc}")
-        return {"error": str(exc), "actions": []}
 
 
 ##########################################################################################
@@ -465,7 +143,7 @@ async def handle_waiting_phase() -> None:
         restaurant_state = await get_restaurant_state()
         recipes = await get_recipes()
         market_entries = await get_market_entries()
-        bid_history = await get_bid_history()
+        bid_history = await get_bid_history(current_turn_id)
 
         context = {
             "restaurant": restaurant_state,

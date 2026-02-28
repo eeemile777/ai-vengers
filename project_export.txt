@@ -1,25 +1,28 @@
 ================================================================================
 PROJECT EXPORT
 ================================================================================
-Generated: 2026-02-28 12:05:09
+Generated: 2026-02-28 12:12:40
 Root Directory: /Users/milo/ai-vengers
 ================================================================================
 
 DIRECTORY STRUCTURE
 --------------------------------------------------------------------------------
 ai-vengers/
+├── .env
 ├── CLIENT_TEMPLATE.py
 ├── HACKAPIZZA_MANUAL.md
 ├── INSTRUCTIONS.md
 ├── README.md
 ├── export_project.py
-└── main.py
+├── main.py
+└── requirements.txt
 
 ================================================================================
 
 FILE CONTENTS
 ================================================================================
 
+[BINARY/SKIPPED] .env
 --------------------------------------------------------------------------------
 FILE: CLIENT_TEMPLATE.py
 --------------------------------------------------------------------------------
@@ -826,7 +829,8 @@ FILE: main.py
 # dependencies = [
 #     "aiohttp",
 #     "datapizza-ai",
-#     "datapizza-ai-clients-openai-like"
+#     "datapizza-ai-clients-openai-like",
+#     "python-dotenv"
 # ]
 # ///
 
@@ -838,6 +842,10 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 import aiohttp
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Mandatory: Enable Datapizza Tracing for debugging
 os.environ["DATAPIZZA_TRACE_CLIENT_IO"] = "TRUE"
@@ -1597,6 +1605,15 @@ if __name__ == "__main__":
         log("FATAL", f"Client crashed: {exc}")
 
 
+--------------------------------------------------------------------------------
+FILE: requirements.txt
+--------------------------------------------------------------------------------
+aiohttp>=3.8.0
+datapizza-ai>=0.1.0
+datapizza-ai-clients-openai-like>=0.1.0
+python-dotenv>=1.0.0
+
+
 ================================================================================
-Export complete. 6 files exported.
+Export complete. 7 files exported.
 ================================================================================
