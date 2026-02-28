@@ -4,6 +4,7 @@ from datapizza.tools import Tool
 
 import asyncio
 import json
+from core.safety import is_safe_to_cook
 from memory.state_manager import state_manager
 from .mcp_wrapper import call_mcp_tool
 
@@ -91,5 +92,25 @@ wait_for_dish = Tool(
         "Wait for a prepared dish to be ready before serving. "
         "MUST be called after prepare_dish and BEFORE serve_dish to synchronize with the SSE event from prepare_dish. "
         "Input JSON schema: {\"client_id\": string, \"dish_name\": string}."
+    ),
+)
+
+
+async def _check_safety(client_intolerances: list[str], dish_name: str) -> str:
+    """
+    Deterministically checks if a dish is safe for a client's intolerances.
+    Uses the cached recipes from state_manager — no API call needed.
+    """
+    is_safe = is_safe_to_cook(client_intolerances, dish_name, state_manager.recipes)
+    return json.dumps({"is_safe": is_safe, "dish": dish_name})
+
+
+check_safety = Tool(
+    func=_check_safety,
+    name="check_safety",
+    description=(
+        "Deterministically check if a dish is safe for a client's intolerances. "
+        "ALWAYS call this before prepare_dish. "
+        "Input JSON schema: {\"client_intolerances\": [\"lactose\", \"gluten\"], \"dish_name\": \"Margherita\"}."
     ),
 )

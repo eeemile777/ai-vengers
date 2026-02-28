@@ -3,20 +3,21 @@ from typing import Any
 from datapizza.agents.agent import Agent
 
 from core.client import get_llm_client
-from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_menu, get_recipes, get_meals
-from tools.kitchen_tools import prepare_dish, serve_dish, update_restaurant_is_open, wait_for_dish
+from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_menu, get_recipes, get_meals, get_client_id_for_order
+from tools.kitchen_tools import check_safety, prepare_dish, serve_dish, update_restaurant_is_open, wait_for_dish
 
 
 SERVING_SYSTEM_PROMPT = """You are the autonomous execution engine for the serving phase. Your ONLY goal is safely serving clients and protecting the restaurant's reputation.
 CRITICAL RULES:
-1. LETHAL INTOLERANCES: You MUST check the 'intolerances' field for every client before cooking. Serving a dish containing an intolerant ingredient causes catastrophic failure.
-2. EXECUTION ALGORITHM: For EVERY client that spawns:
-   - Call `get_meals()` to find their specific `client_id` and order text.
-   - Cross-reference their intolerances with `get_recipes()`.
+1. EXECUTION ALGORITHM: For EVERY client task you receive:
+   - Call `get_client_id_for_order({"client_name": "<name>"})` to get their exact client_id. Never guess or fabricate a client_id.
+   - Call `check_safety({"client_intolerances": [...], "dish_name": "<dish>"})` for each candidate dish. The intolerances are provided in your task context.
+   - Only proceed with a dish where `is_safe` is true.
    - Call `prepare_dish({"dish_name": "<safe_dish>"})`.
-   - Call `wait_for_dish({"client_id": "<id>", "dish_name": "<safe_dish>"})` to synchronize the SSE completion event.
+   - ERROR HANDLING: If `prepare_dish` returns an error (missing ingredients, server rejection), DO NOT call `wait_for_dish`. Try a different safe dish or trigger the panic button.
+   - Call `wait_for_dish({"client_id": "<id>", "dish_name": "<safe_dish>"})` only after a successful `prepare_dish`.
    - Call `serve_dish({"dish_name": "<safe_dish>", "client_id": "<id>"})`.
-3. PANIC BUTTON: If you lack the ingredients to cook a safe dish, or if you are overwhelmed by volume, you MUST call `update_restaurant_is_open({"is_open": false})` immediately to protect our reputation. Do NOT hallucinate ingredients you do not have.
+2. PANIC BUTTON: If you cannot find any safe and cookable dish for a client, call `update_restaurant_is_open({"is_open": false})` immediately. If you call this, you MUST immediately stop all tool calls and terminate your execution. Do not attempt to serve any remaining clients.
 Think step-by-step and strictly follow the execution algorithm."""
 
 
@@ -27,7 +28,7 @@ class ServingPipeline:
             name="serving_phase_agent",
             client=llm_client,
             system_prompt=SERVING_SYSTEM_PROMPT,
-            tools=[prepare_dish, wait_for_dish, serve_dish, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
+            tools=[check_safety, get_client_id_for_order, prepare_dish, wait_for_dish, serve_dish, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_recipes, get_meals],
             planning_interval=0,
             max_steps=15,
         )
@@ -37,7 +38,7 @@ class ServingPipeline:
             name="serving_phase_agent",
             client=get_llm_client(),
             system_prompt=SERVING_SYSTEM_PROMPT,
-            tools=[prepare_dish, wait_for_dish, serve_dish, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
+            tools=[check_safety, get_client_id_for_order, prepare_dish, wait_for_dish, serve_dish, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_recipes, get_meals],
             planning_interval=0,
             max_steps=15,
         )

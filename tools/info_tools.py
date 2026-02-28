@@ -136,3 +136,39 @@ get_meals = Tool(
         "Input JSON schema: {} (no parameters needed, automatically uses current turn)."
     ),
 )
+
+
+async def _get_client_id_for_order(client_name: str) -> str:
+    """
+    Deterministically extracts the client_id for a given client by name.
+    Avoids LLM JSON parsing of the full meals array.
+    """
+    try:
+        meals_json = await _get_meals()
+        meals = json.loads(meals_json)
+        if not isinstance(meals, list):
+            meals = meals.get("meals", meals.get("data", []))
+        for meal in meals:
+            name_in_meal = (
+                meal.get("clientName")
+                or meal.get("client_name")
+                or meal.get("name")
+                or ""
+            )
+            if name_in_meal.lower() == client_name.lower():
+                client_id = meal.get("client_id") or meal.get("clientId") or meal.get("id")
+                return json.dumps({"client_id": client_id})
+        return json.dumps({"error": f"No pending order found for {client_name}"})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+get_client_id_for_order = Tool(
+    func=_get_client_id_for_order,
+    name="get_client_id_for_order",
+    description=(
+        "Deterministically get the exact client_id required for serve_dish by passing the client's name. "
+        "ALWAYS use this instead of manually parsing get_meals output. "
+        "Input JSON schema: {\"client_name\": \"Zorak the Astrobaron\"}."
+    ),
+)

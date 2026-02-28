@@ -36,7 +36,7 @@ from agents.speaking_pipeline import speaking_pipeline
 from agents.waiting_pipeline import waiting_pipeline
 from core.config import BASE_URL, TEAM_API_KEY, TEAM_ID
 from memory.state_manager import state_manager
-from tools.info_tools import _get_restaurant
+from tools.info_tools import _get_restaurant, _get_restaurant_menu
 
 
 def log(tag: str, message: str) -> None:
@@ -88,11 +88,17 @@ async def handle_closed_bid_phase() -> None:
     except Exception as exc:
         log("PHASE", f"Could not pre-fetch restaurant for bidding: {exc}")
         restaurant = {}
+    try:
+        menu = json.loads(await _get_restaurant_menu())
+    except Exception as exc:
+        log("PHASE", f"Could not pre-fetch menu for bidding: {exc}")
+        menu = []
     result = await bidding_pipeline.a_run(
         f"We are in the closed_bid phase. "
-        f"Current restaurant state (balance and inventory): {json.dumps(restaurant)}. "
+        f"Current inventory: {json.dumps(restaurant.get('inventory', {}))}. "
+        f"Current published menu: {json.dumps(menu)}. "
         f"Available recipes: {json.dumps(state_manager.recipes)}. "
-        "Using only this data, calculate which ingredients you are missing and submit exactly one closed_bid immediately. Do NOT call get_restaurant or get_recipes again."
+        "Calculate which ingredients you need to cook the dishes on your menu but don't have in inventory. Submit exactly ONE closed_bid for those missing ingredients. Do NOT call any lookup tools."
     )
     log("PIPELINE", str(result))
 
@@ -104,6 +110,26 @@ async def handle_waiting_phase() -> None:
     )
     log("PIPELINE", str(result))
 
+
+async def handle_serving_phase() -> None:
+    log("PHASE", "SERVING PHASE STARTED")
+    while state_manager.phase == "serving":
+        if state_manager.active_clients:
+            client_data = state_manager.active_clients.pop(0)
+            client_name = client_data.get("clientName", "unknown")
+            intolerances = client_data.get("intolerances", [])
+            order_text = client_data.get("orderText", "")
+            log("PIPELINE", f"Serving client sequentially: {client_name}")
+            await serving_pipeline.a_run(
+                f"A new client has arrived. Client name: \"{client_name}\". "
+                f"Their intolerances (as a list): {json.dumps(intolerances)}. "
+                f"Their order text: \"{order_text}\". "
+                "Call get_client_id_for_order to get their client_id. "
+                "Call check_safety with their intolerances for each candidate dish before cooking. "
+                "Follow the full execution algorithm in your system prompt."
+            )
+        else:
+            await asyncio.sleep(1)
 
 
 async def handle_stopped_phase() -> None:
@@ -121,6 +147,8 @@ async def handle_stopped_phase() -> None:
 #                              EVENT HANDLERS (FROM TEMPLATE)                            #
 ##########################################################################################
 
+active_phase_task: asyncio.Task | None = None
+
 
 async def game_started(data: dict[str, Any]) -> None:
     state_manager.turn_id = data.get("turn_id", 0)
@@ -128,18 +156,26 @@ async def game_started(data: dict[str, Any]) -> None:
 
 
 async def game_phase_changed(data: dict[str, Any]) -> None:
+    global active_phase_task
     state_manager.phase = data.get("phase", "unknown")
+    if "turn_id" in data:
+        state_manager.turn_id = data["turn_id"]
     log("EVENT", f"Phase changed to: {state_manager.phase}")
+
+    if active_phase_task and not active_phase_task.done():
+        log("SYS", "Cancelling previous phase task...")
+        active_phase_task.cancel()
 
     handlers: dict[str, Callable[[], Awaitable[None]]] = {
         "speaking": handle_speaking_phase,
         "closed_bid": handle_closed_bid_phase,
         "waiting": handle_waiting_phase,
+        "serving": handle_serving_phase,
         "stopped": handle_stopped_phase,
     }
 
     if handler := handlers.get(state_manager.phase):
-        asyncio.create_task(handler())
+        active_phase_task = asyncio.create_task(handler())
     else:
         log("EVENT", f"Unknown phase: {state_manager.phase}")
 
@@ -147,13 +183,9 @@ async def game_phase_changed(data: dict[str, Any]) -> None:
 async def client_spawned(data: dict[str, Any]) -> None:
     client_name = data.get("clientName", "unknown")
     order_text = data.get("orderText", "")
+    intolerances = data.get("intolerances", [])
     state_manager.active_clients.append(data)
-    log("EVENT", f"CLIENT SPAWNED - clientName={client_name}, order={order_text}")
-    asyncio.create_task(serving_pipeline.a_run(
-        f"A new client has arrived. Client name: {client_name}. "
-        f"Their order and intolerances: \"{order_text}\". "
-        "Use get_meals to fetch their specific client_id, then prepare_dish with a safe dish, wait_for_dish, and serve_dish."
-    ))
+    log("EVENT", f"CLIENT SPAWNED - clientName={client_name}, intolerances={intolerances}, order={order_text}")
 
 
 async def preparation_complete(data: dict[str, Any]) -> None:
@@ -246,12 +278,29 @@ async def listen_once(session: aiohttp.ClientSession) -> None:
             await handle_line(line)
 
 
-async def listen_once_and_exit_on_drop() -> None:
+async def listen_with_retry() -> None:
+    """Reconnect-on-drop SSE loop. Handles 409 (duplicate connection) with backoff."""
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=None)
+    backoff = 5
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        await listen_once(session)
-        log("SSE", "Connection closed, exiting")
+    while True:
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                await listen_once(session)
+                log("SSE", "Connection closed — reconnecting in 3s...")
+                backoff = 5
+                await asyncio.sleep(3)
+        except aiohttp.ClientResponseError as exc:
+            if exc.status == 409:
+                log("SSE", f"409 Conflict — another connection is active. Retrying in {backoff}s...")
+            else:
+                log("SSE", f"HTTP {exc.status} — retrying in {backoff}s...")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+        except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
+            log("SSE", f"Connection error ({exc}) — retrying in {backoff}s...")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60)
 
 
 async def main() -> None:
@@ -260,7 +309,7 @@ async def main() -> None:
     log("INIT", f"Base URL: {BASE_URL}")
     log("INIT", "LLM: Regolo.ai gpt-oss-120b via datapizza OpenAILikeClient")
     await init_static_data()
-    await listen_once_and_exit_on_drop()
+    await listen_with_retry()
 
 
 if __name__ == "__main__":

@@ -1,24 +1,53 @@
-from typing import Any
+import json
+from typing import Any, Literal
 
 from datapizza.tools import Tool
+from pydantic import BaseModel, Field, ValidationError
 
 from .mcp_wrapper import call_mcp_tool
 
+
+# ---------------------------------------------------------------------------
+# Pydantic schemas — validate before every outgoing API call
+# ---------------------------------------------------------------------------
+
+class BidItem(BaseModel):
+    ingredient: str
+    bid: float = Field(ge=0, description="Price willing to pay per unit")
+    quantity: int = Field(gt=0, description="Units to purchase")
+
+
+class MenuItem(BaseModel):
+    name: str
+    price: float = Field(ge=0, description="Price in Saldo")
+
+
+class MarketEntryRequest(BaseModel):
+    side: Literal["BUY", "SELL"]
+    ingredient_name: str
+    quantity: int = Field(gt=0)
+    price: float = Field(gt=0)
+
+
+# ---------------------------------------------------------------------------
+# Tool implementations
+# ---------------------------------------------------------------------------
 
 async def _create_market_entry(side: str, ingredient_name: str, quantity: int, price: float) -> str:
     """
     Format: {"side": "BUY"|"SELL", "ingredient_name": string, "quantity": int, "price": float}
     Create a public market entry to buy or sell ingredients.
     """
-    return await call_mcp_tool(
-        "create_market_entry",
-        {
-            "side": side.upper(),
-            "ingredient_name": ingredient_name,
-            "quantity": quantity,
-            "price": price,
-        },
-    )
+    try:
+        req = MarketEntryRequest(
+            side=side.upper(),
+            ingredient_name=ingredient_name,
+            quantity=quantity,
+            price=price,
+        )
+    except ValidationError as exc:
+        return json.dumps({"ok": False, "tool": "create_market_entry", "error": str(exc), "retriable": False})
+    return await call_mcp_tool("create_market_entry", req.model_dump())
 
 
 async def _execute_transaction(market_entry_id: int) -> str:
@@ -42,7 +71,11 @@ async def _closed_bid(bids: list[dict[str, Any]]) -> str:
     Format: {"bids": [{"ingredient": string, "bid": number, "quantity": number}, ...]}
     Submit the turn's blind auction bid payload.
     """
-    return await call_mcp_tool("closed_bid", {"bids": bids})
+    try:
+        validated = [BidItem(**b) for b in bids]
+    except ValidationError as exc:
+        return json.dumps({"ok": False, "tool": "closed_bid", "error": f"Invalid bid format: {exc}", "retriable": False})
+    return await call_mcp_tool("closed_bid", {"bids": [b.model_dump() for b in validated]})
 
 
 async def _save_menu(items: list[dict[str, Any]]) -> str:
@@ -50,7 +83,11 @@ async def _save_menu(items: list[dict[str, Any]]) -> str:
     Format: {"items": [{"name": string, "price": number}, ...]}
     Save or replace the current restaurant menu.
     """
-    return await call_mcp_tool("save_menu", {"items": items})
+    try:
+        validated = [MenuItem(**item) for item in items]
+    except ValidationError as exc:
+        return json.dumps({"ok": False, "tool": "save_menu", "error": f"Invalid menu format: {exc}", "retriable": False})
+    return await call_mcp_tool("save_menu", {"items": [m.model_dump() for m in validated]})
 
 
 async def _send_message(recipient_id: int, text: str) -> str:
