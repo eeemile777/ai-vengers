@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 
 from datapizza.agents.agent import Agent
@@ -6,6 +7,7 @@ from core.client import get_llm_client
 from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_menu, get_recipes, get_meals, get_client_id_for_order
 from tools.kitchen_tools import check_safety, prepare_dish, serve_dish, update_restaurant_is_open, wait_for_dish
 
+logger = logging.getLogger(__name__)
 
 SERVING_SYSTEM_PROMPT = """You are the autonomous execution engine for the serving phase. Your ONLY goal is safely serving clients and protecting the restaurant's reputation.
 CRITICAL RULES:
@@ -44,7 +46,10 @@ class ServingPipeline:
         )
 
     async def a_run(self, task_input: str) -> Any:
-        return await self.phase_agent.a_run(task_input=task_input)
+        return await self.phase_agent.a_run(
+            task_input=task_input,
+            tool_choice="auto",
+        )
 
 
 serving_pipeline = ServingPipeline()

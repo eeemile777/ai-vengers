@@ -36,6 +36,7 @@ from agents.speaking_pipeline import speaking_pipeline
 from agents.waiting_pipeline import waiting_pipeline
 from core.config import BASE_URL, TEAM_API_KEY, TEAM_ID
 from memory.state_manager import state_manager
+from models.schemas import ClosedBidResponse, MenuUpdateResponse
 from tools.info_tools import _get_restaurant, _get_restaurant_menu
 
 
@@ -76,31 +77,41 @@ async def handle_speaking_phase() -> None:
     log("PHASE", "SPEAKING PHASE STARTED")
     await print_status_report()
     result = await speaking_pipeline.a_run(
-        "We are in the speaking phase. Use your tools to check the restaurant and market, then publish an initial menu and optionally send alliance messages."
+        "We are in the speaking phase. Use your tools to check the restaurant and market, then publish an initial menu and optionally send alliance messages.",
+        response_format=MenuUpdateResponse,
     )
-    log("PIPELINE", str(result))
+    if isinstance(result, MenuUpdateResponse):
+        log("PIPELINE", f"Speaking phase returned structured menu: {len(result.menu_items)} items")
+    else:
+        log("PIPELINE", f"Speaking phase completed (agent result)")
 
 
 async def handle_closed_bid_phase() -> None:
     log("PHASE", "CLOSED_BID PHASE STARTED")
     try:
-        restaurant = json.loads(await _get_restaurant())
+        restaurant_raw = await _get_restaurant()
+        restaurant = json.loads(restaurant_raw)
     except Exception as exc:
         log("PHASE", f"Could not pre-fetch restaurant for bidding: {exc}")
         restaurant = {}
     try:
-        menu = json.loads(await _get_restaurant_menu())
+        menu_raw = await _get_restaurant_menu()
+        menu = json.loads(menu_raw)
     except Exception as exc:
         log("PHASE", f"Could not pre-fetch menu for bidding: {exc}")
         menu = []
-    result = await bidding_pipeline.a_run(
+    result: ClosedBidResponse | object = await bidding_pipeline.a_run(
         f"We are in the closed_bid phase. "
         f"Current inventory: {json.dumps(restaurant.get('inventory', {}))}. "
         f"Current published menu: {json.dumps(menu)}. "
         f"Available recipes: {json.dumps(state_manager.recipes)}. "
-        "Calculate which ingredients you need to cook the dishes on your menu but don't have in inventory. Submit exactly ONE closed_bid for those missing ingredients. Do NOT call any lookup tools."
+        "Calculate which ingredients you need to cook the dishes on your menu but don't have in inventory. Submit exactly ONE closed_bid for those missing ingredients. Do NOT call any lookup tools.",
+        response_format=ClosedBidResponse,
     )
-    log("PIPELINE", str(result))
+    if isinstance(result, ClosedBidResponse):
+        log("PIPELINE", f"Bidding submitted {len(result.bids)} bids. Reasoning: {result.reasoning}")
+    else:
+        log("PIPELINE", f"Bidding phase completed (agent result)")
 
 
 async def handle_waiting_phase() -> None:
@@ -108,7 +119,7 @@ async def handle_waiting_phase() -> None:
     result = await waiting_pipeline.a_run(
         "We are in the waiting phase. Use your tools to check restaurant inventory and market entries, then update the menu to feasible dishes and buy/sell missing or excess ingredients as needed."
     )
-    log("PIPELINE", str(result))
+    log("PIPELINE", f"Waiting phase completed")
 
 
 async def handle_serving_phase() -> None:
@@ -119,15 +130,13 @@ async def handle_serving_phase() -> None:
             client_name = client_data.get("clientName", "unknown")
             intolerances = client_data.get("intolerances", [])
             order_text = client_data.get("orderText", "")
-            log("PIPELINE", f"Serving client sequentially: {client_name}")
-            await serving_pipeline.a_run(
-                f"A new client has arrived. Client name: \"{client_name}\". "
-                f"Their intolerances (as a list): {json.dumps(intolerances)}. "
-                f"Their order text: \"{order_text}\". "
-                "Call get_client_id_for_order to get their client_id. "
-                "Call check_safety with their intolerances for each candidate dish before cooking. "
-                "Follow the full execution algorithm in your system prompt."
+            log("PIPELINE", f"Serving client: {client_name}")
+            result = await serving_pipeline.a_run(
+                f"Serve this client. Name: \"{client_name}\". "
+                f"Intolerances: {json.dumps(intolerances)}. "
+                f"Order: \"{order_text}\"."
             )
+            log("PIPELINE", f"Finished serving {client_name}")
         else:
             await asyncio.sleep(1)
 

@@ -1,8 +1,8 @@
 ================================================================================
 PROJECT EXPORT
 ================================================================================
-Generated: 2026-02-28 21:22:07
-Root Directory: /Users/milo/ai-vengers
+Generated: 2026-02-28 22:22:58
+Root Directory: C:\Users\Enrico\Desktop\HACKAPIZZA_FINAL\ai-vengers
 ================================================================================
 
 DIRECTORY STRUCTURE
@@ -1137,6 +1137,26 @@ async def handle_waiting_phase() -> None:
     log("PIPELINE", str(result))
 
 
+async def handle_serving_phase() -> None:
+    log("PHASE", "SERVING PHASE STARTED")
+    while state_manager.phase == "serving":
+        if state_manager.active_clients:
+            client_data = state_manager.active_clients.pop(0)
+            client_name = client_data.get("clientName", "unknown")
+            intolerances = client_data.get("intolerances", [])
+            order_text = client_data.get("orderText", "")
+            log("PIPELINE", f"Serving client sequentially: {client_name}")
+            await serving_pipeline.a_run(
+                f"A new client has arrived. Client name: \"{client_name}\". "
+                f"Their intolerances (as a list): {json.dumps(intolerances)}. "
+                f"Their order text: \"{order_text}\". "
+                "Call get_client_id_for_order to get their client_id. "
+                "Call check_safety with their intolerances for each candidate dish before cooking. "
+                "Follow the full execution algorithm in your system prompt."
+            )
+        else:
+            await asyncio.sleep(1)
+
 
 async def handle_stopped_phase() -> None:
     log("PHASE", "STOPPED PHASE STARTED")
@@ -1153,6 +1173,8 @@ async def handle_stopped_phase() -> None:
 #                              EVENT HANDLERS (FROM TEMPLATE)                            #
 ##########################################################################################
 
+active_phase_task: asyncio.Task | None = None
+
 
 async def game_started(data: dict[str, Any]) -> None:
     state_manager.turn_id = data.get("turn_id", 0)
@@ -1160,20 +1182,26 @@ async def game_started(data: dict[str, Any]) -> None:
 
 
 async def game_phase_changed(data: dict[str, Any]) -> None:
+    global active_phase_task
     state_manager.phase = data.get("phase", "unknown")
     if "turn_id" in data:
         state_manager.turn_id = data["turn_id"]
     log("EVENT", f"Phase changed to: {state_manager.phase}")
 
+    if active_phase_task and not active_phase_task.done():
+        log("SYS", "Cancelling previous phase task...")
+        active_phase_task.cancel()
+
     handlers: dict[str, Callable[[], Awaitable[None]]] = {
         "speaking": handle_speaking_phase,
         "closed_bid": handle_closed_bid_phase,
         "waiting": handle_waiting_phase,
+        "serving": handle_serving_phase,
         "stopped": handle_stopped_phase,
     }
 
     if handler := handlers.get(state_manager.phase):
-        asyncio.create_task(handler())
+        active_phase_task = asyncio.create_task(handler())
     else:
         log("EVENT", f"Unknown phase: {state_manager.phase}")
 
@@ -1184,14 +1212,6 @@ async def client_spawned(data: dict[str, Any]) -> None:
     intolerances = data.get("intolerances", [])
     state_manager.active_clients.append(data)
     log("EVENT", f"CLIENT SPAWNED - clientName={client_name}, intolerances={intolerances}, order={order_text}")
-    asyncio.create_task(serving_pipeline.a_run(
-        f"A new client has arrived. Client name: \"{client_name}\". "
-        f"Their intolerances (as a list): {json.dumps(intolerances)}. "
-        f"Their order text: \"{order_text}\". "
-        "Call get_client_id_for_order to get their client_id. "
-        "Call check_safety with their intolerances for each candidate dish before cooking. "
-        "Follow the full execution algorithm in your system prompt."
-    ))
 
 
 async def preparation_complete(data: dict[str, Any]) -> None:
@@ -1284,12 +1304,30 @@ async def listen_once(session: aiohttp.ClientSession) -> None:
             await handle_line(line)
 
 
-async def listen_once_and_exit_on_drop() -> None:
+async def listen_with_retry() -> None:
+    """Reconnect-on-drop SSE loop. Handles 409 (duplicate connection) with backoff."""
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=None)
+    backoff = 5
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        await listen_once(session)
-        log("SSE", "Connection closed, exiting")
+    while True:
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                await listen_once(session)
+            log("SSE", "Connection closed — reconnecting in 3s...")
+            backoff = 5
+            await asyncio.sleep(3)
+
+        except aiohttp.ClientResponseError as exc:
+            if exc.status == 409:
+                log("SSE", f"409 Conflict — another connection is active. Retrying in {backoff}s...")
+            else:
+                log("SSE", f"HTTP {exc.status} — retrying in {backoff}s...")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+        except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
+            log("SSE", f"Connection error ({exc}) — retrying in {backoff}s...")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60)
 
 
 async def main() -> None:
@@ -1298,7 +1336,7 @@ async def main() -> None:
     log("INIT", f"Base URL: {BASE_URL}")
     log("INIT", "LLM: Regolo.ai gpt-oss-120b via datapizza OpenAILikeClient")
     await init_static_data()
-    await listen_once_and_exit_on_drop()
+    await listen_with_retry()
 
 
 if __name__ == "__main__":
@@ -1322,7 +1360,405 @@ python-dotenv
 
 [BINARY/SKIPPED] test.ipynb
 --------------------------------------------------------------------------------
-FILE: tools/__init__.py
+FILE: agents\__init__.py
+--------------------------------------------------------------------------------
+from .bidding_pipeline import bidding_pipeline
+from .serving_pipeline import serving_pipeline
+from .speaking_pipeline import speaking_pipeline
+from .waiting_pipeline import waiting_pipeline
+
+__all__ = ["speaking_pipeline", "bidding_pipeline", "waiting_pipeline", "serving_pipeline"]
+
+
+--------------------------------------------------------------------------------
+FILE: agents\bidding_pipeline.py
+--------------------------------------------------------------------------------
+from typing import Any
+
+from datapizza.agents.agent import Agent
+
+from core.client import get_llm_client
+from tools.market_tools import closed_bid
+
+
+BIDDING_SYSTEM_PROMPT = """You are the procurement engine for the closed_bid phase. Your objective is zero-waste ingredient acquisition.
+CRITICAL RULES:
+1. INGREDIENTS EXPIRE: All ingredients expire at the end of this turn. NEVER hoard. Buy exactly what you need.
+2. SINGLE BID OVERRIDE: Submitting multiple bids overwrites the previous one. You must calculate your ENTIRE bid list and submit it in a SINGLE `closed_bid` tool call.
+3. CALCULATION ALGORITHM:
+   - The restaurant state (balance and inventory) and recipes are already provided in this task — do NOT call any lookup tools.
+   - Identify the dishes on your planned menu.
+   - Calculate the total quantity of each ingredient required.
+   - Subtract your current inventory from the task context.
+   - The result is your target purchase list.
+   - Submit exactly ONE `closed_bid` with an aggressive but efficient price for these missing ingredients.
+4. STOP RULE: If `closed_bid` returns "retriable": false, do NOT retry. Terminate your sequence immediately."""
+
+
+class BiddingPipeline:
+    def __init__(self) -> None:
+        llm_client = get_llm_client()
+        self.phase_agent = Agent(
+            name="bidding_phase_agent",
+            client=llm_client,
+            system_prompt=BIDDING_SYSTEM_PROMPT,
+            tools=[closed_bid],
+            planning_interval=0,
+            max_steps=5,
+        )
+
+    def flush_agent_memory(self) -> None:
+        self.phase_agent = Agent(
+            name="bidding_phase_agent",
+            client=get_llm_client(),
+            system_prompt=BIDDING_SYSTEM_PROMPT,
+            tools=[closed_bid],
+            planning_interval=0,
+            max_steps=5,
+        )
+
+    async def a_run(self, task_input: str) -> Any:
+        return await self.phase_agent.a_run(
+            task_input=task_input,
+            tool_choice="auto",
+        )
+
+
+bidding_pipeline = BiddingPipeline()
+
+
+--------------------------------------------------------------------------------
+FILE: agents\serving_pipeline.py
+--------------------------------------------------------------------------------
+from typing import Any
+
+from datapizza.agents.agent import Agent
+
+from core.client import get_llm_client
+from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_menu, get_recipes, get_meals, get_client_id_for_order
+from tools.kitchen_tools import check_safety, prepare_dish, serve_dish, update_restaurant_is_open, wait_for_dish
+
+
+SERVING_SYSTEM_PROMPT = """You are the autonomous execution engine for the serving phase. Your ONLY goal is safely serving clients and protecting the restaurant's reputation.
+CRITICAL RULES:
+1. EXECUTION ALGORITHM: For EVERY client task you receive:
+   - Call `get_client_id_for_order({"client_name": "<name>"})` to get their exact client_id. Never guess or fabricate a client_id.
+   - Call `check_safety({"client_intolerances": [...], "dish_name": "<dish>"})` for each candidate dish. The intolerances are provided in your task context.
+   - Only proceed with a dish where `is_safe` is true.
+   - Call `prepare_dish({"dish_name": "<safe_dish>"})`.
+   - ERROR HANDLING: If `prepare_dish` returns an error (missing ingredients, server rejection), DO NOT call `wait_for_dish`. Try a different safe dish or trigger the panic button.
+   - Call `wait_for_dish({"client_id": "<id>", "dish_name": "<safe_dish>"})` only after a successful `prepare_dish`.
+   - Call `serve_dish({"dish_name": "<safe_dish>", "client_id": "<id>"})`.
+2. PANIC BUTTON: If you cannot find any safe and cookable dish for a client, call `update_restaurant_is_open({"is_open": false})` immediately. If you call this, you MUST immediately stop all tool calls and terminate your execution. Do not attempt to serve any remaining clients.
+Think step-by-step and strictly follow the execution algorithm."""
+
+
+class ServingPipeline:
+    def __init__(self) -> None:
+        llm_client = get_llm_client()
+        self.phase_agent = Agent(
+            name="serving_phase_agent",
+            client=llm_client,
+            system_prompt=SERVING_SYSTEM_PROMPT,
+            tools=[check_safety, get_client_id_for_order, prepare_dish, wait_for_dish, serve_dish, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_recipes, get_meals],
+            planning_interval=0,
+            max_steps=15,
+        )
+
+    def flush_agent_memory(self) -> None:
+        self.phase_agent = Agent(
+            name="serving_phase_agent",
+            client=get_llm_client(),
+            system_prompt=SERVING_SYSTEM_PROMPT,
+            tools=[check_safety, get_client_id_for_order, prepare_dish, wait_for_dish, serve_dish, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_recipes, get_meals],
+            planning_interval=0,
+            max_steps=15,
+        )
+
+    async def a_run(self, task_input: str) -> Any:
+        return await self.phase_agent.a_run(task_input=task_input)
+
+
+serving_pipeline = ServingPipeline()
+
+
+--------------------------------------------------------------------------------
+FILE: agents\speaking_pipeline.py
+--------------------------------------------------------------------------------
+from typing import Any
+
+from datapizza.agents.agent import Agent
+
+from core.client import get_llm_client
+from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_menu, get_recipes, get_meals
+from tools.kitchen_tools import update_restaurant_is_open
+from tools.market_tools import save_menu, send_message
+
+
+SPEAKING_SYSTEM_PROMPT = """
+You are the Executive Chef and General Manager of a galactic restaurant operating in the speaking phase. Your objective is to initialize the restaurant for the upcoming turn, define the menu strategy, and calculate the exact ingredient requirements for the bidding team.
+
+### EXECUTION DIRECTIVE (STRICT ORDER):
+1. Use the update_restaurant_is_open tool with {"is_open": true} to ensure your restaurant is open for business.
+2. Use the get_recipes tool to retrieve the complete catalog of available dishes.
+3. Analyze the recipes and select exactly 10 dishes based on their prestige: 
+   - 3 high prestige dishes
+   - 3 medium prestige dishes
+   - 4 low prestige dishes
+4. Use the save_menu tool to publish these 10 dishes as your initial menu. Price them strategically based on their prestige.
+5. Terminate your execution by outputting a clear, formatted JSON list of all unique ingredients required to cook these 10 recipes. Do not output anything else in your final response except this list, as it will be programmatically passed to the bidding agent.
+
+### CRITICAL RULES:
+- Do NOT attempt to use the send_message tool. You are on a strict communications blackout.
+- You must complete all tool executions before ending your turn.
+"""
+
+
+class SpeakingPipeline:
+    def __init__(self) -> None:
+        llm_client = get_llm_client()
+        self.phase_agent = Agent(
+            name="speaking_phase_agent",
+            client=llm_client,
+            system_prompt=SPEAKING_SYSTEM_PROMPT,
+            tools=[send_message, save_menu, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
+            planning_interval=0,
+            max_steps=15,
+        )
+
+    def flush_agent_memory(self) -> None:
+        self.phase_agent = Agent(
+            name="speaking_phase_agent",
+            client=get_llm_client(),
+            system_prompt=SPEAKING_SYSTEM_PROMPT,
+            tools=[send_message, save_menu, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
+            planning_interval=0,
+            max_steps=15,
+        )
+
+    async def a_run(self, task_input: str) -> Any:
+        return await self.phase_agent.a_run(task_input=task_input)
+
+
+speaking_pipeline = SpeakingPipeline()
+
+
+--------------------------------------------------------------------------------
+FILE: agents\waiting_pipeline.py
+--------------------------------------------------------------------------------
+from typing import Any
+
+from datapizza.agents.agent import Agent
+
+from core.client import get_llm_client
+from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_menu, get_recipes, get_meals
+from tools.kitchen_tools import update_restaurant_is_open
+from tools.market_tools import (
+    create_market_entry,
+    delete_market_entry,
+    execute_transaction,
+    save_menu,
+)
+
+
+WAITING_SYSTEM_PROMPT = """You operate only during the waiting phase. This is a critical safety check before the doors open.
+CRITICAL RULES:
+1. INVENTORY REALITY CHECK: Call `get_restaurant` to see your ACTUAL won inventory.
+2. RECIPE CROSS-REFERENCE: Call `get_recipes()` and for every dish on your current menu, verify you have ALL required ingredients in sufficient quantity. Never leave a dish on the menu if you are missing a single required ingredient.
+3. MENU CORRECTION: Call `save_menu` to REMOVE any dish you cannot physically cook. Only keep dishes you can fully prepare.
+4. ARBITRAGE ALGORITHM:
+   - Call `get_market_entries` to scan the public market.
+   - BUYING: If you are one ingredient short on a high-value dish, use `execute_transaction` to snipe it from the market.
+   - SELLING: If you have excess ingredients that will expire this turn, use `create_market_entry({"side": "SELL", ...})` to recover value.
+5. DOOR CHECK: Once your menu contains only cookable dishes, call `update_restaurant_is_open({"is_open": true})` so clients can arrive."""
+
+
+class WaitingPipeline:
+    def __init__(self) -> None:
+        llm_client = get_llm_client()
+        self.phase_agent = Agent(
+            name="waiting_phase_agent",
+            client=llm_client,
+            system_prompt=WAITING_SYSTEM_PROMPT,
+            tools=[save_menu, create_market_entry, execute_transaction, delete_market_entry, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
+            planning_interval=0,
+            max_steps=20,
+        )
+
+    def flush_agent_memory(self) -> None:
+        self.phase_agent = Agent(
+            name="waiting_phase_agent",
+            client=get_llm_client(),
+            system_prompt=WAITING_SYSTEM_PROMPT,
+            tools=[save_menu, create_market_entry, execute_transaction, delete_market_entry, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
+            planning_interval=0,
+            max_steps=20,
+        )
+
+    async def a_run(self, task_input: str) -> Any:
+        return await self.phase_agent.a_run(task_input=task_input)
+
+
+waiting_pipeline = WaitingPipeline()
+
+
+--------------------------------------------------------------------------------
+FILE: core\__init__.py
+--------------------------------------------------------------------------------
+from .client import get_llm_client
+from .config import BASE_URL, TEAM_API_KEY, TEAM_ID
+from .safety import is_safe_to_cook
+
+__all__ = ["get_llm_client", "BASE_URL", "TEAM_API_KEY", "TEAM_ID", "is_safe_to_cook"]
+
+
+--------------------------------------------------------------------------------
+FILE: core\client.py
+--------------------------------------------------------------------------------
+from datapizza.clients.openai_like import OpenAILikeClient
+
+from core.config import REGOLO_API_KEY
+
+
+def get_llm_client() -> OpenAILikeClient:
+    return OpenAILikeClient(
+        api_key=REGOLO_API_KEY,
+        model="gpt-oss-120b",
+        base_url="https://api.regolo.ai/v1",
+    )
+
+
+--------------------------------------------------------------------------------
+FILE: core\config.py
+--------------------------------------------------------------------------------
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+BASE_URL = os.getenv("BASE_URL", "https://hackapizza.datapizza.tech")
+TEAM_ID = int(os.getenv("TEAM_ID", "0"))
+TEAM_API_KEY = os.getenv("TEAM_API_KEY", "")
+REGOLO_API_KEY = os.getenv("REGOLO_API_KEY", "")
+
+if TEAM_ID <= 0:
+    raise SystemExit("Set TEAM_ID environment variable")
+
+if not TEAM_API_KEY:
+    raise SystemExit("Set TEAM_API_KEY environment variable")
+
+if not REGOLO_API_KEY:
+    raise SystemExit("Set REGOLO_API_KEY environment variable")
+
+
+--------------------------------------------------------------------------------
+FILE: core\safety.py
+--------------------------------------------------------------------------------
+from typing import Any
+
+
+def _normalize(values: list[str]) -> set[str]:
+    return {value.strip().lower() for value in values if isinstance(value, str) and value.strip()}
+
+
+def _extract_ingredient_names(recipe: dict[str, Any]) -> set[str]:
+    raw_ingredients = (
+        recipe.get("ingredients")
+        or recipe.get("required_ingredients")
+        or recipe.get("recipe_ingredients")
+        or []
+    )
+
+    ingredient_names: set[str] = set()
+    if isinstance(raw_ingredients, list):
+        for item in raw_ingredients:
+            if isinstance(item, str):
+                name = item.strip().lower()
+                if name:
+                    ingredient_names.add(name)
+                continue
+
+            if isinstance(item, dict):
+                maybe_name = (
+                    item.get("name")
+                    or item.get("ingredient")
+                    or item.get("ingredient_name")
+                    or item.get("item")
+                )
+                if isinstance(maybe_name, str) and maybe_name.strip():
+                    ingredient_names.add(maybe_name.strip().lower())
+
+    return ingredient_names
+
+
+def is_safe_to_cook(
+    client_intolerances: list[str],
+    dish_name: str,
+    recipes_cache: list[dict],
+) -> bool:
+    normalized_dish = dish_name.strip().lower()
+    if not normalized_dish:
+        return False
+
+    intolerances = _normalize(client_intolerances)
+
+    for recipe in recipes_cache:
+        recipe_name = (
+            recipe.get("name")
+            or recipe.get("dish_name")
+            or recipe.get("title")
+            or ""
+        )
+        if not isinstance(recipe_name, str):
+            continue
+        if recipe_name.strip().lower() != normalized_dish:
+            continue
+
+        required_ingredients = _extract_ingredient_names(recipe)
+        return len(required_ingredients.intersection(intolerances)) == 0
+
+    return False
+
+
+--------------------------------------------------------------------------------
+FILE: memory\__init__.py
+--------------------------------------------------------------------------------
+from .state_manager import state_manager
+
+__all__ = ["state_manager"]
+
+
+--------------------------------------------------------------------------------
+FILE: memory\state_manager.py
+--------------------------------------------------------------------------------
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class StateManager:
+    turn_id: int = 0
+    phase: str = "unknown"
+    recipes: list[dict[str, Any]] = field(default_factory=list)
+    prepared_dishes: list[str] = field(default_factory=list)
+    active_clients: list[dict[str, Any]] = field(default_factory=list)
+
+    def reset_turn_state(self) -> None:
+        self.prepared_dishes.clear()
+        self.active_clients.clear()
+
+    def on_game_reset(self) -> None:
+        self.turn_id = 0
+        self.phase = "unknown"
+        self.reset_turn_state()
+
+
+state_manager = StateManager()
+
+
+--------------------------------------------------------------------------------
+FILE: tools\__init__.py
 --------------------------------------------------------------------------------
 from .info_tools import (
     _get_recipes,
@@ -1363,7 +1799,7 @@ __all__ = [
 
 
 --------------------------------------------------------------------------------
-FILE: tools/info_tools.py
+FILE: tools\info_tools.py
 --------------------------------------------------------------------------------
 from typing import Any
 
@@ -1542,7 +1978,7 @@ get_client_id_for_order = Tool(
 
 
 --------------------------------------------------------------------------------
-FILE: tools/kitchen_tools.py
+FILE: tools\kitchen_tools.py
 --------------------------------------------------------------------------------
 from typing import Any
 
@@ -1663,29 +2099,58 @@ check_safety = Tool(
 
 
 --------------------------------------------------------------------------------
-FILE: tools/market_tools.py
+FILE: tools\market_tools.py
 --------------------------------------------------------------------------------
-from typing import Any
+import json
+from typing import Any, Literal
 
 from datapizza.tools import Tool
+from pydantic import BaseModel, Field, ValidationError
 
 from .mcp_wrapper import call_mcp_tool
 
+
+# ---------------------------------------------------------------------------
+# Pydantic schemas — validate before every outgoing API call
+# ---------------------------------------------------------------------------
+
+class BidItem(BaseModel):
+    ingredient: str
+    bid: float = Field(gt=0, description="Price willing to pay per unit (must be > 0)")
+    quantity: int = Field(gt=0, description="Units to purchase")
+
+
+class MenuItem(BaseModel):
+    name: str
+    price: float = Field(ge=0, description="Price in Saldo")
+
+
+class MarketEntryRequest(BaseModel):
+    side: Literal["BUY", "SELL"]
+    ingredient_name: str
+    quantity: int = Field(gt=0)
+    price: float = Field(gt=0)
+
+
+# ---------------------------------------------------------------------------
+# Tool implementations
+# ---------------------------------------------------------------------------
 
 async def _create_market_entry(side: str, ingredient_name: str, quantity: int, price: float) -> str:
     """
     Format: {"side": "BUY"|"SELL", "ingredient_name": string, "quantity": int, "price": float}
     Create a public market entry to buy or sell ingredients.
     """
-    return await call_mcp_tool(
-        "create_market_entry",
-        {
-            "side": side.upper(),
-            "ingredient_name": ingredient_name,
-            "quantity": quantity,
-            "price": price,
-        },
-    )
+    try:
+        req = MarketEntryRequest(
+            side=side.upper(),
+            ingredient_name=ingredient_name,
+            quantity=quantity,
+            price=price,
+        )
+    except ValidationError as exc:
+        return json.dumps({"ok": False, "tool": "create_market_entry", "error": str(exc), "retriable": False})
+    return await call_mcp_tool("create_market_entry", req.model_dump())
 
 
 async def _execute_transaction(market_entry_id: int) -> str:
@@ -1709,7 +2174,11 @@ async def _closed_bid(bids: list[dict[str, Any]]) -> str:
     Format: {"bids": [{"ingredient": string, "bid": number, "quantity": number}, ...]}
     Submit the turn's blind auction bid payload.
     """
-    return await call_mcp_tool("closed_bid", {"bids": bids})
+    try:
+        validated = [BidItem(**b) for b in bids]
+    except ValidationError as exc:
+        return json.dumps({"ok": False, "tool": "closed_bid", "error": f"Invalid bid format: {exc}", "retriable": False})
+    return await call_mcp_tool("closed_bid", {"bids": [b.model_dump() for b in validated]})
 
 
 async def _save_menu(items: list[dict[str, Any]]) -> str:
@@ -1717,7 +2186,11 @@ async def _save_menu(items: list[dict[str, Any]]) -> str:
     Format: {"items": [{"name": string, "price": number}, ...]}
     Save or replace the current restaurant menu.
     """
-    return await call_mcp_tool("save_menu", {"items": items})
+    try:
+        validated = [MenuItem(**item) for item in items]
+    except ValidationError as exc:
+        return json.dumps({"ok": False, "tool": "save_menu", "error": f"Invalid menu format: {exc}", "retriable": False})
+    return await call_mcp_tool("save_menu", {"items": [m.model_dump() for m in validated]})
 
 
 async def _send_message(recipient_id: int, text: str) -> str:
@@ -1760,7 +2233,7 @@ closed_bid = Tool(
     name="closed_bid",
     description=(
         "Submit the turn blind auction bid payload. "
-        "Input JSON schema: {\"bids\": [{\"ingredient\": string, \"bid\": number >= 0, \"quantity\": number > 0}, ...]}."
+        "Input JSON schema: {\"bids\": [{\"ingredient\": string, \"bid\": number > 0, \"quantity\": number > 0}, ...]}."
     ),
 )
 
@@ -1784,7 +2257,7 @@ send_message = Tool(
 
 
 --------------------------------------------------------------------------------
-FILE: tools/mcp_wrapper.py
+FILE: tools\mcp_wrapper.py
 --------------------------------------------------------------------------------
 import asyncio
 import json
@@ -1886,396 +2359,6 @@ async def call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> str:
         "error": {"message": "Rate limit exceeded after retries"},
         "retriable": True,
     })
-
-
---------------------------------------------------------------------------------
-FILE: core/__init__.py
---------------------------------------------------------------------------------
-from .client import get_llm_client
-from .config import BASE_URL, TEAM_API_KEY, TEAM_ID
-from .safety import is_safe_to_cook
-
-__all__ = ["get_llm_client", "BASE_URL", "TEAM_API_KEY", "TEAM_ID", "is_safe_to_cook"]
-
-
---------------------------------------------------------------------------------
-FILE: core/client.py
---------------------------------------------------------------------------------
-from datapizza.clients.openai_like import OpenAILikeClient
-
-from core.config import REGOLO_API_KEY
-
-
-def get_llm_client() -> OpenAILikeClient:
-    return OpenAILikeClient(
-        api_key=REGOLO_API_KEY,
-        model="gpt-oss-120b",
-        base_url="https://api.regolo.ai/v1",
-    )
-
-
---------------------------------------------------------------------------------
-FILE: core/config.py
---------------------------------------------------------------------------------
-import os
-
-from dotenv import load_dotenv
-
-load_dotenv()
-
-BASE_URL = os.getenv("BASE_URL", "https://hackapizza.datapizza.tech")
-TEAM_ID = int(os.getenv("TEAM_ID", "0"))
-TEAM_API_KEY = os.getenv("TEAM_API_KEY", "")
-REGOLO_API_KEY = os.getenv("REGOLO_API_KEY", "")
-
-if TEAM_ID <= 0:
-    raise SystemExit("Set TEAM_ID environment variable")
-
-if not TEAM_API_KEY:
-    raise SystemExit("Set TEAM_API_KEY environment variable")
-
-if not REGOLO_API_KEY:
-    raise SystemExit("Set REGOLO_API_KEY environment variable")
-
-
---------------------------------------------------------------------------------
-FILE: core/safety.py
---------------------------------------------------------------------------------
-from typing import Any
-
-
-def _normalize(values: list[str]) -> set[str]:
-    return {value.strip().lower() for value in values if isinstance(value, str) and value.strip()}
-
-
-def _extract_ingredient_names(recipe: dict[str, Any]) -> set[str]:
-    raw_ingredients = (
-        recipe.get("ingredients")
-        or recipe.get("required_ingredients")
-        or recipe.get("recipe_ingredients")
-        or []
-    )
-
-    ingredient_names: set[str] = set()
-    if isinstance(raw_ingredients, list):
-        for item in raw_ingredients:
-            if isinstance(item, str):
-                name = item.strip().lower()
-                if name:
-                    ingredient_names.add(name)
-                continue
-
-            if isinstance(item, dict):
-                maybe_name = (
-                    item.get("name")
-                    or item.get("ingredient")
-                    or item.get("ingredient_name")
-                    or item.get("item")
-                )
-                if isinstance(maybe_name, str) and maybe_name.strip():
-                    ingredient_names.add(maybe_name.strip().lower())
-
-    return ingredient_names
-
-
-def is_safe_to_cook(
-    client_intolerances: list[str],
-    dish_name: str,
-    recipes_cache: list[dict],
-) -> bool:
-    normalized_dish = dish_name.strip().lower()
-    if not normalized_dish:
-        return False
-
-    intolerances = _normalize(client_intolerances)
-
-    for recipe in recipes_cache:
-        recipe_name = (
-            recipe.get("name")
-            or recipe.get("dish_name")
-            or recipe.get("title")
-            or ""
-        )
-        if not isinstance(recipe_name, str):
-            continue
-        if recipe_name.strip().lower() != normalized_dish:
-            continue
-
-        required_ingredients = _extract_ingredient_names(recipe)
-        return len(required_ingredients.intersection(intolerances)) == 0
-
-    return False
-
-
---------------------------------------------------------------------------------
-FILE: memory/__init__.py
---------------------------------------------------------------------------------
-from .state_manager import state_manager
-
-__all__ = ["state_manager"]
-
-
---------------------------------------------------------------------------------
-FILE: memory/state_manager.py
---------------------------------------------------------------------------------
-from dataclasses import dataclass, field
-from typing import Any
-
-
-@dataclass
-class StateManager:
-    turn_id: int = 0
-    phase: str = "unknown"
-    recipes: list[dict[str, Any]] = field(default_factory=list)
-    prepared_dishes: list[str] = field(default_factory=list)
-    active_clients: list[dict[str, Any]] = field(default_factory=list)
-
-    def reset_turn_state(self) -> None:
-        self.prepared_dishes.clear()
-        self.active_clients.clear()
-
-    def on_game_reset(self) -> None:
-        self.turn_id = 0
-        self.phase = "unknown"
-        self.reset_turn_state()
-
-
-state_manager = StateManager()
-
-
---------------------------------------------------------------------------------
-FILE: agents/__init__.py
---------------------------------------------------------------------------------
-from .bidding_pipeline import bidding_pipeline
-from .serving_pipeline import serving_pipeline
-from .speaking_pipeline import speaking_pipeline
-from .waiting_pipeline import waiting_pipeline
-
-__all__ = ["speaking_pipeline", "bidding_pipeline", "waiting_pipeline", "serving_pipeline"]
-
-
---------------------------------------------------------------------------------
-FILE: agents/bidding_pipeline.py
---------------------------------------------------------------------------------
-from typing import Any
-
-from datapizza.agents.agent import Agent
-
-from core.client import get_llm_client
-from tools.market_tools import closed_bid
-
-
-BIDDING_SYSTEM_PROMPT = """You are the procurement engine for the closed_bid phase. Your objective is zero-waste ingredient acquisition.
-CRITICAL RULES:
-1. INGREDIENTS EXPIRE: All ingredients expire at the end of this turn. NEVER hoard. Buy exactly what you need.
-2. SINGLE BID OVERRIDE: Submitting multiple bids overwrites the previous one. You must calculate your ENTIRE bid list and submit it in a SINGLE `closed_bid` tool call.
-3. CALCULATION ALGORITHM:
-   - The restaurant state (balance and inventory) and recipes are already provided in this task — do NOT call any lookup tools.
-   - Identify the dishes on your planned menu.
-   - Calculate the total quantity of each ingredient required.
-   - Subtract your current inventory from the task context.
-   - The result is your target purchase list.
-   - Submit exactly ONE `closed_bid` with an aggressive but efficient price for these missing ingredients.
-4. STOP RULE: If `closed_bid` returns "retriable": false, do NOT retry. Terminate your sequence immediately."""
-
-
-class BiddingPipeline:
-    def __init__(self) -> None:
-        llm_client = get_llm_client()
-        self.phase_agent = Agent(
-            name="bidding_phase_agent",
-            client=llm_client,
-            system_prompt=BIDDING_SYSTEM_PROMPT,
-            tools=[closed_bid],
-            planning_interval=0,
-            max_steps=5,
-        )
-
-    def flush_agent_memory(self) -> None:
-        self.phase_agent = Agent(
-            name="bidding_phase_agent",
-            client=get_llm_client(),
-            system_prompt=BIDDING_SYSTEM_PROMPT,
-            tools=[closed_bid],
-            planning_interval=0,
-            max_steps=5,
-        )
-
-    async def a_run(self, task_input: str) -> Any:
-        return await self.phase_agent.a_run(
-            task_input=task_input,
-            tool_choice="auto",
-        )
-
-
-bidding_pipeline = BiddingPipeline()
-
-
---------------------------------------------------------------------------------
-FILE: agents/serving_pipeline.py
---------------------------------------------------------------------------------
-from typing import Any
-
-from datapizza.agents.agent import Agent
-
-from core.client import get_llm_client
-from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_menu, get_recipes, get_meals, get_client_id_for_order
-from tools.kitchen_tools import check_safety, prepare_dish, serve_dish, update_restaurant_is_open, wait_for_dish
-
-
-SERVING_SYSTEM_PROMPT = """You are the autonomous execution engine for the serving phase. Your ONLY goal is safely serving clients and protecting the restaurant's reputation.
-CRITICAL RULES:
-1. EXECUTION ALGORITHM: For EVERY client task you receive:
-   - Call `get_client_id_for_order({"client_name": "<name>"})` to get their exact client_id. Never guess or fabricate a client_id.
-   - Call `check_safety({"client_intolerances": [...], "dish_name": "<dish>"})` for each candidate dish. The intolerances are provided in your task context.
-   - Only proceed with a dish where `is_safe` is true.
-   - Call `prepare_dish({"dish_name": "<safe_dish>"})`.
-   - ERROR HANDLING: If `prepare_dish` returns an error (missing ingredients, server rejection), DO NOT call `wait_for_dish`. Try a different safe dish or trigger the panic button.
-   - Call `wait_for_dish({"client_id": "<id>", "dish_name": "<safe_dish>"})` only after a successful `prepare_dish`.
-   - Call `serve_dish({"dish_name": "<safe_dish>", "client_id": "<id>"})`.
-2. PANIC BUTTON: If you cannot find any safe and cookable dish for a client, call `update_restaurant_is_open({"is_open": false})` immediately. If you call this, you MUST immediately stop all tool calls and terminate your execution. Do not attempt to serve any remaining clients.
-Think step-by-step and strictly follow the execution algorithm."""
-
-
-class ServingPipeline:
-    def __init__(self) -> None:
-        llm_client = get_llm_client()
-        self.phase_agent = Agent(
-            name="serving_phase_agent",
-            client=llm_client,
-            system_prompt=SERVING_SYSTEM_PROMPT,
-            tools=[check_safety, get_client_id_for_order, prepare_dish, wait_for_dish, serve_dish, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_recipes, get_meals],
-            planning_interval=0,
-            max_steps=15,
-        )
-
-    def flush_agent_memory(self) -> None:
-        self.phase_agent = Agent(
-            name="serving_phase_agent",
-            client=get_llm_client(),
-            system_prompt=SERVING_SYSTEM_PROMPT,
-            tools=[check_safety, get_client_id_for_order, prepare_dish, wait_for_dish, serve_dish, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_recipes, get_meals],
-            planning_interval=0,
-            max_steps=15,
-        )
-
-    async def a_run(self, task_input: str) -> Any:
-        return await self.phase_agent.a_run(task_input=task_input)
-
-
-serving_pipeline = ServingPipeline()
-
-
---------------------------------------------------------------------------------
-FILE: agents/speaking_pipeline.py
---------------------------------------------------------------------------------
-from typing import Any
-
-from datapizza.agents.agent import Agent
-
-from core.client import get_llm_client
-from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_menu, get_recipes, get_meals
-from tools.kitchen_tools import update_restaurant_is_open
-from tools.market_tools import save_menu, send_message
-
-
-SPEAKING_SYSTEM_PROMPT = """You operate only during the speaking phase.
-CRITICAL MENU RULE:
-You currently have NO INVENTORY because ingredients expire every turn.
-1. Choose a target demographic for this turn (e.g., Astrobarons for high margins, or Explorers for volume).
-2. Call `get_recipes()` and select 1 or 2 dishes that fit this strategy and are realistic to acquire.
-3. Call `save_menu` with these dishes and appropriate prices (high for Astrobarons, low for volume).
-4. This menu dictates what you will attempt to buy in the upcoming `closed_bid` phase. Do not overcomplicate it.
-DIPLOMACY: Optionally use `send_message` to contact other teams for cartel coordination or misdirection.
-STATUS: Call `get_restaurant` to verify the restaurant is open (`is_open: true`). If closed, call `update_restaurant_is_open({"is_open": true})`."""
-
-
-class SpeakingPipeline:
-    def __init__(self) -> None:
-        llm_client = get_llm_client()
-        self.phase_agent = Agent(
-            name="speaking_phase_agent",
-            client=llm_client,
-            system_prompt=SPEAKING_SYSTEM_PROMPT,
-            tools=[send_message, save_menu, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
-            planning_interval=0,
-            max_steps=15,
-        )
-
-    def flush_agent_memory(self) -> None:
-        self.phase_agent = Agent(
-            name="speaking_phase_agent",
-            client=get_llm_client(),
-            system_prompt=SPEAKING_SYSTEM_PROMPT,
-            tools=[send_message, save_menu, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
-            planning_interval=0,
-            max_steps=15,
-        )
-
-    async def a_run(self, task_input: str) -> Any:
-        return await self.phase_agent.a_run(task_input=task_input)
-
-
-speaking_pipeline = SpeakingPipeline()
-
-
---------------------------------------------------------------------------------
-FILE: agents/waiting_pipeline.py
---------------------------------------------------------------------------------
-from typing import Any
-
-from datapizza.agents.agent import Agent
-
-from core.client import get_llm_client
-from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_menu, get_recipes, get_meals
-from tools.kitchen_tools import update_restaurant_is_open
-from tools.market_tools import (
-    create_market_entry,
-    delete_market_entry,
-    execute_transaction,
-    save_menu,
-)
-
-
-WAITING_SYSTEM_PROMPT = """You operate only during the waiting phase. This is a critical safety check before the doors open.
-CRITICAL RULES:
-1. INVENTORY REALITY CHECK: Call `get_restaurant` to see your ACTUAL won inventory.
-2. RECIPE CROSS-REFERENCE: Call `get_recipes()` and for every dish on your current menu, verify you have ALL required ingredients in sufficient quantity. Never leave a dish on the menu if you are missing a single required ingredient.
-3. MENU CORRECTION: Call `save_menu` to REMOVE any dish you cannot physically cook. Only keep dishes you can fully prepare.
-4. ARBITRAGE ALGORITHM:
-   - Call `get_market_entries` to scan the public market.
-   - BUYING: If you are one ingredient short on a high-value dish, use `execute_transaction` to snipe it from the market.
-   - SELLING: If you have excess ingredients that will expire this turn, use `create_market_entry({"side": "SELL", ...})` to recover value.
-5. DOOR CHECK: Once your menu contains only cookable dishes, call `update_restaurant_is_open({"is_open": true})` so clients can arrive."""
-
-
-class WaitingPipeline:
-    def __init__(self) -> None:
-        llm_client = get_llm_client()
-        self.phase_agent = Agent(
-            name="waiting_phase_agent",
-            client=llm_client,
-            system_prompt=WAITING_SYSTEM_PROMPT,
-            tools=[save_menu, create_market_entry, execute_transaction, delete_market_entry, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
-            planning_interval=0,
-            max_steps=20,
-        )
-
-    def flush_agent_memory(self) -> None:
-        self.phase_agent = Agent(
-            name="waiting_phase_agent",
-            client=get_llm_client(),
-            system_prompt=WAITING_SYSTEM_PROMPT,
-            tools=[save_menu, create_market_entry, execute_transaction, delete_market_entry, update_restaurant_is_open, get_restaurant, get_restaurant_menu, get_market_entries, get_recipes, get_meals],
-            planning_interval=0,
-            max_steps=20,
-        )
-
-    async def a_run(self, task_input: str) -> Any:
-        return await self.phase_agent.a_run(task_input=task_input)
-
-
-waiting_pipeline = WaitingPipeline()
 
 
 ================================================================================

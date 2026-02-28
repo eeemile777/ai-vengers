@@ -4,23 +4,13 @@ from typing import Any, Literal
 from datapizza.tools import Tool
 from pydantic import BaseModel, Field, ValidationError
 
+from models.schemas import BidItem, MenuItem
 from .mcp_wrapper import call_mcp_tool
 
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas — validate before every outgoing API call
 # ---------------------------------------------------------------------------
-
-class BidItem(BaseModel):
-    ingredient: str
-    bid: float = Field(gt=0, description="Price willing to pay per unit (must be > 0)")
-    quantity: int = Field(gt=0, description="Units to purchase")
-
-
-class MenuItem(BaseModel):
-    name: str
-    price: float = Field(ge=0, description="Price in Saldo")
-
 
 class MarketEntryRequest(BaseModel):
     side: Literal["BUY", "SELL"]

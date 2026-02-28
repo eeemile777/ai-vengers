@@ -1,10 +1,13 @@
+import logging
 from typing import Any
 
 from datapizza.agents.agent import Agent
+from pydantic import BaseModel, ValidationError
 
 from core.client import get_llm_client
 from tools.market_tools import closed_bid
 
+logger = logging.getLogger(__name__)
 
 BIDDING_SYSTEM_PROMPT = """You are the procurement engine for the closed_bid phase. Your objective is zero-waste ingredient acquisition.
 CRITICAL RULES:
@@ -42,11 +45,32 @@ class BiddingPipeline:
             max_steps=5,
         )
 
-    async def a_run(self, task_input: str) -> Any:
-        return await self.phase_agent.a_run(
+    async def a_run(
+        self,
+        task_input: str,
+        response_format: type[BaseModel] | None = None,
+    ) -> Any:
+        result = await self.phase_agent.a_run(
             task_input=task_input,
             tool_choice="auto",
         )
+
+        if response_format is not None and result is not None:
+            # Extract structured data from StructuredBlocks if present
+            from datapizza.core.clients.models import StructuredBlock
+
+            for block in result.content:
+                if isinstance(block, StructuredBlock) and isinstance(block.content, response_format):
+                    return block.content
+
+            # Fallback: validate the final text against the schema
+            if result.text:
+                try:
+                    return response_format.model_validate_json(result.text)
+                except ValidationError as exc:
+                    logger.warning("Bidding structured output validation failed: %s", exc)
+
+        return result
 
 
 bidding_pipeline = BiddingPipeline()

@@ -1,6 +1,8 @@
+import logging
 from typing import Any
 
 from datapizza.agents.agent import Agent
+from pydantic import BaseModel, ValidationError
 
 from core.client import get_llm_client
 from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_menu, get_recipes, get_meals
@@ -12,6 +14,7 @@ from tools.market_tools import (
     save_menu,
 )
 
+logger = logging.getLogger(__name__)
 
 WAITING_SYSTEM_PROMPT = """You operate only during the waiting phase. This is a critical safety check before the doors open.
 CRITICAL RULES:
@@ -47,8 +50,30 @@ class WaitingPipeline:
             max_steps=20,
         )
 
-    async def a_run(self, task_input: str) -> Any:
-        return await self.phase_agent.a_run(task_input=task_input)
+    async def a_run(
+        self,
+        task_input: str,
+        response_format: type[BaseModel] | None = None,
+    ) -> Any:
+        result = await self.phase_agent.a_run(
+            task_input=task_input,
+            tool_choice="auto",
+        )
+
+        if response_format is not None and result is not None:
+            from datapizza.core.clients.models import StructuredBlock
+
+            for block in result.content:
+                if isinstance(block, StructuredBlock) and isinstance(block.content, response_format):
+                    return block.content
+
+            if result.text:
+                try:
+                    return response_format.model_validate_json(result.text)
+                except ValidationError as exc:
+                    logger.warning("Waiting structured output validation failed: %s", exc)
+
+        return result
 
 
 waiting_pipeline = WaitingPipeline()

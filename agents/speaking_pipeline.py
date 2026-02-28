@@ -1,12 +1,15 @@
+import logging
 from typing import Any
 
 from datapizza.agents.agent import Agent
+from pydantic import BaseModel, ValidationError
 
 from core.client import get_llm_client
 from tools.info_tools import get_market_entries, get_restaurant, get_restaurant_menu, get_recipes, get_meals
 from tools.kitchen_tools import update_restaurant_is_open
 from tools.market_tools import save_menu, send_message
 
+logger = logging.getLogger(__name__)
 
 SPEAKING_SYSTEM_PROMPT = """
 You are the Executive Chef and General Manager of a galactic restaurant operating in the speaking phase. Your objective is to initialize the restaurant for the upcoming turn, define the menu strategy, and calculate the exact ingredient requirements for the bidding team.
@@ -49,8 +52,27 @@ class SpeakingPipeline:
             max_steps=15,
         )
 
-    async def a_run(self, task_input: str) -> Any:
-        return await self.phase_agent.a_run(task_input=task_input)
+    async def a_run(
+        self,
+        task_input: str,
+        response_format: type[BaseModel] | None = None,
+    ) -> Any:
+        result = await self.phase_agent.a_run(task_input=task_input, tool_choice="auto")
+
+        if response_format is not None and result is not None:
+            from datapizza.core.clients.models import StructuredBlock
+
+            for block in result.content:
+                if isinstance(block, StructuredBlock) and isinstance(block.content, response_format):
+                    return block.content
+
+            if result.text:
+                try:
+                    return response_format.model_validate_json(result.text)
+                except ValidationError as exc:
+                    logger.warning("Speaking structured output validation failed: %s", exc)
+
+        return result
 
 
 speaking_pipeline = SpeakingPipeline()
